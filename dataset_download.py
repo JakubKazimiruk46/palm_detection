@@ -58,48 +58,48 @@ except Exception as e:
 print("Setup completed")
 
 class_names = [
-   'call',
-   'dislike',
-   'fist',
-   'four',
-   'like',
-   'mute',
-   'ok',
-   'one',
-   'palm',
-   'peace_inverted',
-   'peace',
-   'rock',
-   'stop_inverted',
-   'stop',
-   'three',
-   'three2',
-   'two_up',
-   'two_up_inverted',
-   'no_gesture']
+    'call',
+    'dislike',
+    'fist',
+    'four',
+    'like',
+    'mute',
+    'ok',
+    'one',
+    'palm',
+    'peace_inverted',
+    'peace',
+    'rock',
+    'stop_inverted',
+    'stop',
+    'three',
+    'three2',
+    'two_up',
+    'two_up_inverted',
+    'no_gesture']
 
 FORMATS = (".jpeg", ".jpg", ".jp2", ".png", ".tiff", ".jfif", ".bmp", ".webp", ".heic")
 
 class_names = [
-   'call',
-   'dislike',
-   'fist',
-   'four',
-   'like',
-   'mute',
-   'ok',
-   'one',
-   'palm',
-   'peace_inverted',
-   'peace',
-   'rock',
-   'stop_inverted',
-   'stop',
-   'three',
-   'three2',
-   'two_up',
-   'two_up_inverted',
-   'no_gesture']
+    'call',
+    'dislike',
+    'fist',
+    'four',
+    'like',
+    'mute',
+    'ok',
+    'one',
+    'palm',
+    'peace_inverted',
+    'peace',
+    'rock',
+    'stop_inverted',
+    'stop',
+    'three',
+    'three2',
+    'two_up',
+    'two_up_inverted',
+    'no_gesture']
 
 FORMATS = (".jpeg", ".jpg", ".jp2", ".png", ".tiff", ".jfif", ".bmp", ".webp", ".heic")
 
@@ -117,58 +117,60 @@ class GestureDataset(torch.utils.data.Dataset):
         return files
 
     def __read_annotations(self, path):
-      annotations_all = None
-      exists_images = []
-      found_annotations = False
-         
-      for target in class_names:
-         path_to_csv = os.path.join(path, f"{target}.json")
-         if os.path.exists(path_to_csv):
-               found_annotations = True
-               json_annotation = json.load(open(
-                  os.path.join(path, f"{target}.json")
-               ))
+        annotations_all = None
+        exists_images = []
+        found_annotations = False
 
-               json_annotation = [dict(annotation, **{"name": f"{name}.jpg"}) for name, annotation in
-                                 zip(json_annotation, json_annotation.values())]
+        for target in class_names:
+            path_to_csv = os.path.join(path, f"{target}.json")
+            if os.path.exists(path_to_csv):
+                found_annotations = True
+                json_annotation = json.load(open(
+                    os.path.join(path, f"{target}.json")
+                ))
 
-               annotation = pd.DataFrame(json_annotation)
+                json_annotation = [dict(annotation, **{"name": f"{name}.jpg"}) for name, annotation in
+                                   zip(json_annotation, json_annotation.values())]
 
-               annotation["target"] = target
-               if annotations_all is None:
-                  annotations_all = annotation
-               else:
-                  annotations_all = pd.concat([annotations_all, annotation], ignore_index=True)
-               
-               exists_images.extend(
-                  self.__get_files_from_dir(os.path.join(self.path_images, target), FORMATS))
-         else:
-               if target != 'no_gesture':
-                  print(f"Database for {target} not found")
-      
-      if not found_annotations:
-         raise ValueError(f"No annotation files found in {path}. Please ensure annotation files are in the correct location.")
-         
-      if annotations_all is None:
-         raise ValueError("Could not load any annotations. Check that the annotation files exist and are in the correct format.")
+                annotation = pd.DataFrame(json_annotation)
 
-      annotations_all["exists"] = annotations_all["name"].isin(exists_images)
-      annotations_all = annotations_all[annotations_all["exists"]]
+                annotation["target"] = target
+                if annotations_all is None:
+                    annotations_all = annotation
+                else:
+                    annotations_all = pd.concat([annotations_all, annotation], ignore_index=True)
 
-      users = annotations_all["user_id"].unique()
-      users = sorted(users)
-      random.Random(42).shuffle(users)
-      train_users = users[:int(len(users) * 0.8)]
-      val_users = users[int(len(users) * 0.8):]
+                exists_images.extend(
+                    self.__get_files_from_dir(os.path.join(self.path_images, target), FORMATS))
+            else:
+                if target != 'no_gesture':
+                    print(f"Database for {target} not found")
 
-      annotations_all = annotations_all.copy()
+        if not found_annotations:
+            raise ValueError(
+                f"No annotation files found in {path}. Please ensure annotation files are in the correct location.")
 
-      if self.is_train:
-         annotations_all = annotations_all[annotations_all["user_id"].isin(train_users)]
-      else:
-         annotations_all = annotations_all[annotations_all["user_id"].isin(val_users)]
+        if annotations_all is None:
+            raise ValueError(
+                "Could not load any annotations. Check that the annotation files exist and are in the correct format.")
 
-      return annotations_all
+        annotations_all["exists"] = annotations_all["name"].isin(exists_images)
+        annotations_all = annotations_all[annotations_all["exists"]]
+
+        users = annotations_all["user_id"].unique()
+        users = sorted(users)
+        random.Random(42).shuffle(users)
+        train_users = users[:int(len(users) * 0.8)]
+        val_users = users[int(len(users) * 0.8):]
+
+        annotations_all = annotations_all.copy()
+
+        if self.is_train:
+            annotations_all = annotations_all[annotations_all["user_id"].isin(train_users)]
+        else:
+            annotations_all = annotations_all[annotations_all["user_id"].isin(val_users)]
+
+        return annotations_all
 
     def __init__(self, path_annotation, path_images, is_train, transform=None):
         self.is_train = is_train
@@ -211,7 +213,8 @@ class GestureDataset(torch.utils.data.Dataset):
         if self.transform:
             image = self.transform(image)
         return image, target
-    
+
+
 random_seed = 42
 num_classes = len(class_names)
 batch_size = 16
@@ -227,8 +230,9 @@ train_data = GestureDataset(path_images='./dataset/subsample',
                             is_train=True, transform=transform)
 
 test_data = GestureDataset(path_images='./dataset/subsample',
-                            path_annotation='./dataset/ann_subsample',
-                            is_train=False, transform=transform)
+                           path_annotation='./dataset/ann_subsample',
+                           is_train=False, transform=transform)
+
 
 def collate_fn(batch):
     batch_targets = list()
@@ -240,8 +244,11 @@ def collate_fn(batch):
                               "labels": b[1]["labels"]})
     return images, batch_targets
 
-train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,collate_fn=collate_fn, shuffle=True, num_workers=4)
-test_dataloader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,collate_fn=collate_fn, shuffle=True, num_workers=4)
+
+train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, collate_fn=collate_fn, shuffle=True,
+                                               num_workers=4)
+test_dataloader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, collate_fn=collate_fn, shuffle=True,
+                                              num_workers=4)
 
 lr = 0.005
 momentum = 0.9
@@ -259,23 +266,25 @@ lr_scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
     optimizer, start_factor=warmup_factor, total_iters=warmup_iters
 )
 
+
 def eval(model, test_dataloader, epoch):
     model.eval()
     with torch.no_grad():
         mapmetric = MeanAveragePrecision()
-        
+
         for images, targets in test_dataloader:
             images = list(image.to(device) for image in images)
             output = model(images)
-            
+
             for pred in output:
                 for key, value in pred.items():
                     pred[key] = value.cpu()
-                    
+
             mapmetric.update(output, targets)
 
     metrics = mapmetric.compute()
     return metrics
+
 
 os.makedirs('checkpoints', exist_ok=True)
 
@@ -292,16 +301,16 @@ for epoch in range(num_epoch):
         loss_dict = model(images, targets)
         losses = sum(loss for loss in loss_dict.values())
         loss = losses.item()
-        
+
         optimizer.zero_grad()
         losses.backward()
         optimizer.step()
-        
+
         lr_scheduler_warmup.step()
-        
+
         total = total + batch
         sum_loss = sum_loss + loss
-    
+
     metrics = eval(model, test_dataloader, epoch)
     print(f"epoch : {epoch}  |||  loss : {sum_loss / total} ||| MAP : {metrics['map']}")
 
@@ -312,7 +321,7 @@ images = []
 for gesture in class_names[:-1]:
     image_path = glob(f'/kaggle/working/dataset/subsample/{gesture}/*.jpg')[0]
     images.append(Image.open(image_path))
-    
+
 images_tensors = images.copy()
 images_tensors_input = list(transform(image).to(device) for image in images_tensors)
 
@@ -350,10 +359,11 @@ final_images = []
 for bbox, score, label, image in zip(bboxes, scores, labels, images):
     image = np.array(image)
     for i, box in enumerate(bbox):
-        _,width,_  = image.shape
+        _, width, _ = image.shape
         image = cv2.rectangle(image, box[:2], box[2:], thickness=3, color=[255, 0, 255])
-        cv2.putText(image, f'{short_class_names[label[i]]}: {score[i]:0.2f}', (box[0], box[1]), cv2.FONT_HERSHEY_SIMPLEX,
-                        width / 780, (0, 0, 255), 2)
+        cv2.putText(image, f'{short_class_names[label[i]]}: {score[i]:0.2f}', (box[0], box[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    width / 780, (0, 0, 255), 2)
     final_images.append(Image.fromarray(image))
 
 os.makedirs('out_images', exist_ok=True)
@@ -366,6 +376,8 @@ for i, image in enumerate(final_images):
     image.save(out_name)
 
 out_dir = "out_images/"
+
+
 @interact
 def show_images(file=os.listdir(out_dir)):
-    display(DImage(out_dir+file, width=600, height=300))
+    display(DImage(out_dir + file, width=600, height=300))
