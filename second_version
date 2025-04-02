@@ -158,7 +158,7 @@ def create_datasets(images_path='dataset/subsample',
     Helper function to create train and test datasets with error checking
     """
     # Validate dataset paths
-    if not os.path.exists(images_path):
+    if not os.path.exists(images_path): 
         raise FileNotFoundError(f"Images path does not exist: {images_path}")
     
     if not os.path.exists(annotations_path):
