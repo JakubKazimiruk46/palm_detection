@@ -4,7 +4,7 @@ import logging
 import random
 from tqdm import tqdm
 from collections import defaultdict
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 from glob import glob
 
 import pandas as pd
@@ -28,307 +28,387 @@ warnings.filterwarnings('ignore')
 import multiprocessing
 multiprocessing.freeze_support()
 
-class_names = [
-'palm']
+class_names = ['palm', 'no_gesture']  # Wszystkie obsługiwane klasy
 
 FORMATS = (".jpeg", ".jpg", ".jp2", ".png", ".tiff", ".jfif", ".bmp", ".webp", ".heic")
 
 transform = T.ToTensor()
 
 class GestureDataset(torch.utils.data.Dataset):
-
-    @staticmethod
-    def __get_files_from_dir(pth: str, extns: Tuple):
-        if not os.path.exists(pth):
-            print(f"Dataset directory doesn't exist {pth}")
-            return []
-        files = [f for f in os.listdir(pth) if f.endswith(extns)]
-        return files
-
-    def __read_annotations(self, path):
-        annotations_all = None
-        exists_images = []
-        for target in class_names:
-            path_to_csv = os.path.join(path, f"{target}.json")
-            if os.path.exists(path_to_csv):
-                with open(path_to_csv, 'r') as f:
-                    json_annotation = json.load(f)
-
-                json_annotation = [dict(annotation, **{"name": f"{name}.jpg"}) for name, annotation in
-                                   zip(json_annotation, json_annotation.values())]
-
-                annotation = pd.DataFrame(json_annotation)
-
-                annotation["target"] = target
-                annotations_all = pd.concat([annotations_all, annotation], ignore_index=True)
-                exists_images.extend(
-                    self.__get_files_from_dir(os.path.join(self.path_images, target), FORMATS))
-            else:
-                if target != 'no_gesture':
-                    print(f"Database for {target} not found")
-
-        # Remove this line to prevent errors if annotations_all is None
-        if annotations_all is None:
-            raise ValueError("No annotations found in the dataset")
-
-        annotations_all["exists"] = annotations_all["name"].isin(exists_images)
-
-        annotations_all = annotations_all[annotations_all["exists"]]
-
-        users = annotations_all["user_id"].unique()
-        users = sorted(users)
-        random.Random(42).shuffle(users)
-        train_users = users[:int(len(users) * 0.8)]
-        val_users = users[int(len(users) * 0.8):]
-
-        annotations_all = annotations_all.copy()
-
-        if self.is_train:
-            annotations_all = annotations_all[annotations_all["user_id"].isin(train_users)]
-        else:
-            annotations_all = annotations_all[annotations_all["user_id"].isin(val_users)]
-
-        return annotations_all
-
-    def __init__(self, path_annotation, path_images, is_train, transform=None):
+    def __init__(self, annotations_path, images_base_path, is_train=True, transform=None):
         self.is_train = is_train
         self.transform = transform
-        self.path_annotation = path_annotation
-        self.path_images = path_images
-        self.transform = transform
-        self.labels = {label: num for (label, num) in
-                       zip(class_names, range(len(class_names)))}
-        self.annotations = self.__read_annotations(self.path_annotation)
-
+        self.annotations_path = annotations_path
+        self.images_base_path = images_base_path
+        
+        # Mapowanie nazw klas na ich indeksy
+        self.labels = {label: idx for idx, label in enumerate(class_names)}
+        
+        # Wczytaj adnotacje
+        with open(annotations_path, 'r') as f:
+            self.annotations_data = json.load(f)
+        
+        # Przetwórz adnotacje z pliku JSON
+        self.samples = self._prepare_dataset(is_train)
+        print(f"Created dataset with {len(self.samples)} samples")
+        
+        # Wypisz kilka pierwszych przykładów, aby sprawdzić poprawność
+        if len(self.samples) > 0:
+            print("Sample data entries:")
+            for i in range(min(3, len(self.samples))):
+                print(f"  Sample {i+1}: {self.samples[i]}")
+        
+    def _prepare_dataset(self, is_train):
+        """Przetwarza adnotacje do formatu używanego przez dataset"""
+        samples = []
+        
+        # Podziel użytkowników na grupy treningowe i testowe
+        all_users = list(set(anno['user_id'] for anno in self.annotations_data.values()))
+        random.seed(42)  # Dla powtarzalności
+        random.shuffle(all_users)
+        split_idx = int(len(all_users) * 0.8)
+        train_users = set(all_users[:split_idx])
+        test_users = set(all_users[split_idx:])
+        
+        target_users = train_users if is_train else test_users
+        print(f"Total users: {len(all_users)}, {'Training' if is_train else 'Testing'} users: {len(target_users)}")
+        
+        # Dla każdego ID obrazu w adnotacjach
+        for img_id, anno in self.annotations_data.items():
+            if anno['user_id'] not in target_users:
+                continue
+                
+            # Sprawdź, czy plik obrazu istnieje
+            img_found = False
+            img_path = None
+            
+            # Szukaj pliku we wszystkich podkatalogach images_base_path
+            for subdir in os.listdir(self.images_base_path):
+                subdir_path = os.path.join(self.images_base_path, subdir)
+                if not os.path.isdir(subdir_path):
+                    continue
+                
+                for ext in FORMATS:
+                    potential_path = os.path.join(subdir_path, f"{img_id}{ext}")
+                    if os.path.exists(potential_path):
+                        img_path = potential_path
+                        img_found = True
+                        break
+                        
+                if img_found:
+                    break
+            
+            if not img_found:
+                # Spróbuj znaleźć plik bezpośrednio w katalogu bazowym
+                for ext in FORMATS:
+                    potential_path = os.path.join(self.images_base_path, f"{img_id}{ext}")
+                    if os.path.exists(potential_path):
+                        img_path = potential_path
+                        img_found = True
+                        break
+            
+            if not img_found:
+                # Nie znaleziono obrazu - pomijamy tę adnotację
+                continue
+            
+            # Dla każdego bounding boxa w adnotacji
+            for box_idx, (box, label) in enumerate(zip(anno['bboxes'], anno['labels'])):
+                # Dodaj próbkę do listy
+                samples.append({
+                    'image_id': img_id,
+                    'image_path': img_path,
+                    'bbox': box,
+                    'label': label,
+                    'user_id': anno['user_id']
+                })
+        
+        return samples
+        
     def __len__(self):
-        return self.annotations.shape[0]
-
-    def get_sample(self, index: int):
-        row = self.annotations.iloc[[index]].to_dict('records')[0]
-        image_pth = os.path.join(self.path_images, row["target"], row["name"])
-        image = Image.open(image_pth).convert("RGB")
-
-        labels = torch.LongTensor([self.labels[label] for label in row["labels"]])
-
-        target = {}
+        return len(self.samples)
+        
+    def __getitem__(self, idx):
+        # Pobierz informacje o próbce
+        sample = self.samples[idx]
+        
+        # Wczytaj obraz
+        try:
+            image = Image.open(sample['image_path']).convert('RGB')
+        except Exception as e:
+            print(f"Error loading image {sample['image_path']}: {e}")
+            # Zwróć pusty obraz w przypadku błędu
+            image = Image.new('RGB', (100, 100))
+            
         width, height = image.size
-
-        bboxes = []
-
-        for bbox in row["bboxes"]:
-            x1, y1, w, h = bbox
-            bbox_abs = [x1 * width, y1 * height, (x1 + w) * width, (y1 + h) * height]
-            bboxes.append(bbox_abs)
-
-        target["labels"] = labels
-        target["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
-        target["orig_size"] = torch.as_tensor([int(height), int(width)])
-
-        return image, target
-
-    def __getitem__(self, index: int):
-        image, target = self.get_sample(index)
+        
+        # Konwertuj bounding box do formatu [x1, y1, x2, y2] w pikselach
+        x, y, w, h = sample['bbox']
+        x1, y1 = x * width, y * height
+        x2, y2 = (x + w) * width, (y + h) * height
+        
+        # Przygotuj etykietę
+        label_idx = self.labels.get(sample['label'], 0)  # Domyślnie 0, jeśli etykieta nie jest znana
+        
+        # Przygotuj tensory dla detektora obiektów
+        boxes = torch.tensor([[x1, y1, x2, y2]], dtype=torch.float32)
+        labels = torch.tensor([label_idx], dtype=torch.int64)
+        
+        # Transformacja obrazu
         if self.transform:
             image = self.transform(image)
+            
+        # Zwróć dane w formacie wymaganym przez detektor obiektów
+        target = {
+            'boxes': boxes,
+            'labels': labels,
+            'image_id': torch.tensor([idx]),
+        }
+        
         return image, target
 
-# Setting some constants for training
-random_seed = 42
-num_classes = len(class_names)
-batch_size = 16
-num_epoch = 15
-torch.manual_seed(random_seed)
-np.random.seed(random_seed)
-random.seed(random_seed)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 def collate_fn(batch):
-    batch_targets = list()
-    images = list()
-
-    for b in batch:
-        images.append(b[0])
-        batch_targets.append({"boxes": b[1]["boxes"],
-                              "labels": b[1]["labels"]})
-    return images, batch_targets
-
-def create_datasets(images_path='dataset/subsample', 
-                    annotations_path='dataset/ann_subsample'):
     """
-    Helper function to create train and test datasets with error checking
+    Funkcja collate_fn dla DataLoader, obsługująca przypadki z różnymi rozmiarami bounding boxów
     """
-    # Validate dataset paths
-    if not os.path.exists(images_path): 
-        raise FileNotFoundError(f"Images path does not exist: {images_path}")
+    images = []
+    targets = []
     
+    for img, tgt in batch:
+        images.append(img)
+        targets.append(tgt)
+        
+    return images, targets
+
+def create_datasets(images_base_path='images', annotations_path='annotations.json'):
+    """
+    Tworzy zbiory danych treningowych i testowych
+    """
+    # Sprawdź, czy ścieżki istnieją
     if not os.path.exists(annotations_path):
-        raise FileNotFoundError(f"Annotations path does not exist: {annotations_path}")
-
-    train_data = GestureDataset(path_images=images_path,
-                                path_annotation=annotations_path,
-                                is_train=True, transform=transform)
-
-    test_data = GestureDataset(path_images=images_path,
-                               path_annotation=annotations_path,
-                               is_train=False, transform=transform)
+        raise FileNotFoundError(f"Annotations file not found: {annotations_path}")
+        
+    if not os.path.exists(images_base_path):
+        raise FileNotFoundError(f"Images directory not found: {images_base_path}")
     
-    return train_data, test_data
+    print(f"Creating datasets from {annotations_path} and {images_base_path}")
+    print(f"Available subdirectories in {images_base_path}: {os.listdir(images_base_path)}")
+    
+    # Utwórz zbiory danych
+    train_dataset = GestureDataset(
+        annotations_path=annotations_path,
+        images_base_path=images_base_path,
+        is_train=True,
+        transform=transform
+    )
+    
+    test_dataset = GestureDataset(
+        annotations_path=annotations_path,
+        images_base_path=images_base_path,
+        is_train=False,
+        transform=transform
+    )
+    
+    return train_dataset, test_dataset
 
-def create_dataloaders(train_data, test_data, batch_size=16):
+def create_dataloaders(train_data, test_data, batch_size=8):
     """
-    Helper function to create data loaders
+    Tworzy data loadery dla zbiorów treningowych i testowych
     """
+    if len(train_data) == 0 or len(test_data) == 0:
+        raise ValueError("Datasets are empty! Cannot create dataloaders.")
+    
     train_dataloader = torch.utils.data.DataLoader(
-        train_data, 
-        batch_size=batch_size, 
-        collate_fn=collate_fn, 
-        shuffle=True, 
-        num_workers=0  # Important for Windows compatibility
+        train_data,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=0  # Ważne dla kompatybilności z Windows
     )
     
     test_dataloader = torch.utils.data.DataLoader(
-        test_data, 
-        batch_size=batch_size, 
-        collate_fn=collate_fn, 
-        shuffle=True, 
-        num_workers=0  # Important for Windows compatibility
+        test_data,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=0
     )
     
     return train_dataloader, test_dataloader
 
 def initialize_model(num_classes):
     """
-    Initialize the object detection model
+    Inicjalizuje model detekcji obiektów
     """
+    # Używamy modelu SSDLite z MobileNetV3 jako backbone
     model = models.detection.ssdlite320_mobilenet_v3_large(
-        num_classes=num_classes + 1,  # +1 for background 
-        pretrained_backbone=True
+        pretrained=False,
+        num_classes=num_classes + 1  # +1 dla klasy tła
     )
-    model.to(device)
+    
+    # Alternatywnie, możesz użyć Faster R-CNN jeśli potrzebujesz lepszej dokładności (ale wolniejsze)
+    # model = models.detection.fasterrcnn_resnet50_fpn(
+    #     pretrained=False,
+    #     num_classes=num_classes + 1  # +1 dla klasy tła
+    # )
+    
     return model
 
-def configure_optimizer(model, lr=0.005, momentum=0.9, weight_decay=5e-4):
+def train_model(model, train_dataloader, test_dataloader, num_epochs=15, device='cpu'):
     """
-    Configure optimizer and learning rate scheduler
+    Trenuje model detekcji obiektów
     """
+    # Przenieś model na odpowiednie urządzenie
+    model.to(device)
+    
+    # Inicjalizuj optymalizator
     optimizer = torch.optim.SGD(
-        model.parameters(), 
-        lr=lr, 
-        momentum=momentum, 
-        weight_decay=weight_decay
-    )
-
-    warmup_factor = 1.0 / 1000
-    warmup_iters = 1000  # You might want to adjust this
-
-    lr_scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, 
-        start_factor=warmup_factor, 
-        total_iters=warmup_iters
+        model.parameters(),
+        lr=0.005,
+        momentum=0.9,
+        weight_decay=0.0005
     )
     
-    return optimizer, lr_scheduler_warmup
-
-def evaluate_model(model, test_dataloader, device):
-    """
-    Evaluate model performance using Mean Average Precision
-    """
-    model.eval()
-    with torch.no_grad():
-        mapmetric = MeanAveragePrecision()
-        
-        for images, targets in test_dataloader:
-            images = list(image.to(device) for image in images)
-            output = model(images)
-            
-            for pred in output:
-                for key, value in pred.items():
-                    pred[key] = value.cpu()
-                    
-            mapmetric.update(output, targets)
-
-    metrics = mapmetric.compute()
-    return metrics
-
-def train_model(model, train_dataloader, test_dataloader, optimizer, 
-                lr_scheduler, num_epochs=15, device=device):
-    """
-    Main training loop
-    """
+    # Scheduler redukcji współczynnika uczenia
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=5,
+        gamma=0.1
+    )
+    
+    # Utwórz katalog na checkpointy
     os.makedirs('checkpoints', exist_ok=True)
     
+    # Główna pętla treningu
     for epoch in range(num_epochs):
+        # Tryb treningu
         model.train()
-        total_loss = 0
-        total_batches = 0
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
         
-        for images, targets in tqdm(train_dataloader, desc=f'Epoch {epoch}'):
-            images = list(image.to(device) for image in images)
+        # Zmienne do śledzenia straty
+        running_loss = 0.0
+        
+        # Iteracja po batchu danych
+        for i, (images, targets) in enumerate(tqdm(train_dataloader, desc="Training")):
+            # Przenieś dane na urządzenie
+            images = [img.to(device) for img in images]
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
-            # Move targets to device
-            for target in targets:
-                for key, value in target.items():
-                    target[key] = value.to(device)
-            
-            # Zero gradients
+            # Zeruj gradienty
             optimizer.zero_grad()
             
             # Forward pass
             loss_dict = model(images, targets)
             losses = sum(loss for loss in loss_dict.values())
             
-            # Backward pass
+            # Backward pass i optymalizacja
             losses.backward()
             optimizer.step()
-            lr_scheduler.step()
             
-            total_loss += losses.item()
-            total_batches += 1
+            # Aktualizuj zmienne śledzące
+            running_loss += losses.item()
+            
+            # Wypisz bieżącą stratę co jakiś czas
+            if i % 10 == 9:  # co 10 batchów
+                print(f"  Batch {i+1}, Loss: {running_loss / 10:.4f}")
+                running_loss = 0.0
         
-        # Evaluate after each epoch
-        metrics = evaluate_model(model, test_dataloader, device)
+        # Aktualizuj scheduler
+        lr_scheduler.step()
         
-        print(f"Epoch {epoch}: Loss = {total_loss/total_batches:.4f}, mAP = {metrics['map']:.4f}")
+        # Ewaluacja
+        print("Evaluating...")
+        model.eval()
         
-        # Save checkpoint
-        torch.save(model.state_dict(), f'checkpoints/model_epoch_{epoch}.pth')
+        # Użyj Mean Average Precision jako metryki
+        metric = MeanAveragePrecision()
+        
+        with torch.no_grad():
+            for images, targets in tqdm(test_dataloader, desc="Evaluating"):
+                images = [img.to(device) for img in images]
+                targets_cpu = [{k: v.cpu() for k, v in t.items()} for t in targets]
+                
+                # Uzyskaj predykcje
+                predictions = model(images)
+                predictions_cpu = [{k: v.cpu() for k, v in p.items()} for p in predictions]
+                
+                # Aktualizuj metrykę
+                metric.update(predictions_cpu, targets_cpu)
+        
+        # Oblicz metryki
+        metrics = metric.compute()
+        map_value = metrics['map'].item()
+        
+        print(f"  mAP: {map_value:.4f}")
+        
+        # Zapisz model
+        checkpoint_path = f"checkpoints/model_epoch_{epoch+1}.pth"
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': running_loss,
+            'map': map_value
+        }, checkpoint_path)
+        print(f"  Model saved to {checkpoint_path}")
     
     return model
 
 def main():
-    # Suppress warnings and set random seeds for reproducibility
-    warnings.filterwarnings('ignore')
-    multiprocessing.freeze_support()
-
+    # Ustawienia
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Ustaw seed dla powtarzalności
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    
     try:
-        # Create datasets
-        train_data, test_data = create_datasets()
+        # Sprawdź, czy istnieje katalog train i test
+        images_base_path = 'images'  # Ścieżka do katalogu z obrazami
         
-        # Create data loaders
-        train_dataloader, test_dataloader = create_dataloaders(train_data, test_data)
+        if not os.path.exists(images_base_path):
+            print(f"Error: Directory {images_base_path} does not exist!")
+            return
+            
+        # Utwórz zbiory danych
+        train_dataset, test_dataset = create_datasets(
+            images_base_path=images_base_path,
+            annotations_path='annotations.json'
+        )
         
-        # Initialize model
+        if len(train_dataset) == 0:
+            print("Error: Training dataset is empty!")
+            return
+            
+        if len(test_dataset) == 0:
+            print("Error: Test dataset is empty!")
+            return
+        
+        # Utwórz data loadery
+        train_dataloader, test_dataloader = create_dataloaders(
+            train_dataset,
+            test_dataset
+        )
+        
+        # Inicjalizuj model
         model = initialize_model(num_classes=len(class_names))
         
-        # Configure optimizer and learning rate scheduler
-        optimizer, lr_scheduler = configure_optimizer(model)
-        
-        # Train the model
+        # Trenuj model
         trained_model = train_model(
-            model, 
-            train_dataloader, 
-            test_dataloader, 
-            optimizer, 
-            lr_scheduler
+            model=model,
+            train_dataloader=train_dataloader,
+            test_dataloader=test_dataloader,
+            num_epochs=15,
+            device=device
         )
         
         print("Training completed successfully!")
-    
+        
     except Exception as e:
-        print(f"An error occurred during training: {e}")
+        print(f"An error occurred: {e}")
         import traceback
         traceback.print_exc()
 
-# Ensure this is the standard Python multiprocessing safe pattern
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
