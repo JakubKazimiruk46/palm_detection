@@ -20,8 +20,14 @@ from torchvision.transforms import Compose
 from torchvision.transforms import functional as F
 from torchvision import transforms as T
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-
+import matplotlib.pyplot as plt
 import warnings
+
+
+
+
+
+
 
 warnings.filterwarnings('ignore')
 
@@ -221,7 +227,7 @@ def create_datasets(images_base_path='images', annotations_path='annotations.jso
     return train_dataset, test_dataset
 
 
-def create_dataloaders(train_data, test_data, batch_size=8):
+def create_dataloaders(train_data, test_data, batch_size=16):
     """
     Tworzy data loadery dla zbiorów treningowych i testowych
     """
@@ -382,6 +388,7 @@ def main():
     try:
         # Sprawdź, czy istnieje katalog train i test
         images_base_path = 'images'  # Ścieżka do katalogu z obrazami
+        annotations_path = 'annotations.json'  # Ścieżka do pliku z adnotacjami
 
         if not os.path.exists(images_base_path):
             print(f"Error: Directory {images_base_path} does not exist!")
@@ -390,7 +397,7 @@ def main():
         # Utwórz zbiory danych
         train_dataset, test_dataset = create_datasets(
             images_base_path=images_base_path,
-            annotations_path='annotations.json'
+            annotations_path=annotations_path
         )
 
         if len(train_dataset) == 0:
@@ -420,11 +427,381 @@ def main():
         )
 
         print("Training completed successfully!")
+        
+        # Utwórz osobny zbiór ewaluacyjny
+        print("\nCreating separate evaluation dataset...")
+        eval_dataset = create_evaluation_dataset(
+            annotations_path=annotations_path,
+            images_base_path=images_base_path,
+            transform=transform
+        )
+        
+        if len(eval_dataset) == 0:
+            print("Error: Evaluation dataset is empty!")
+            return
+            
+        # Utwórz data loader dla ewaluacji
+        eval_dataloader = torch.utils.data.DataLoader(
+            eval_dataset,
+            batch_size=1,  # Batch size 1 dla lepszej analizy per-image
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=0
+        )
+        
+        # Znajdź najlepszy model na podstawie mAP z walidacji
+        print("\nFinding best checkpoint...")
+        best_checkpoint_path = find_best_checkpoint("checkpoints")
+        
+        if best_checkpoint_path:
+            print(f"Loading best model from {best_checkpoint_path}")
+            checkpoint = torch.load(best_checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            best_map = checkpoint.get('map', 0)
+            print(f"Best validation mAP: {best_map:.4f}")
+        else:
+            print("No checkpoints found, using the last trained model")
+        
+        # Przeprowadź ewaluację z metrykami Dice i IoU
+        print("\nEvaluating model...")
+        evaluation_results = evaluate_model(
+            model=model,
+            eval_dataloader=eval_dataloader,
+            device=device
+        )
+        
+        # Zapisz wyniki ewaluacji
+        results_file = 'evaluation_results.json'
+        with open(results_file, 'w') as f:
+            json.dump(evaluation_results, f, indent=4)
+        print(f"Evaluation results saved to {results_file}")
+        
+        # Wizualizuj przykładowe predykcje
+        print("\nGenerating visualization of predictions...")
+        os.makedirs('visualization', exist_ok=True)
+        visualize_predictions(
+            model=model,
+            eval_dataloader=eval_dataloader,
+            device=device,
+            num_samples=5  # Liczba obrazów do wizualizacji
+        )
 
     except Exception as e:
         print(f"An error occurred: {e}")
         import traceback
         traceback.print_exc()
+
+def find_best_checkpoint(checkpoint_dir):
+    """
+    Znajduje najlepszy checkpoint na podstawie wartości mAP
+    """
+    if not os.path.exists(checkpoint_dir):
+        print(f"Checkpoint directory {checkpoint_dir} does not exist")
+        return None
+        
+    checkpoints = glob(os.path.join(checkpoint_dir, "*.pth"))
+    
+    if not checkpoints:
+        print("No checkpoints found")
+        return None
+    
+    best_map = -1
+    best_checkpoint = None
+    
+    for checkpoint_path in checkpoints:
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            if 'map' in checkpoint and checkpoint['map'] > best_map:
+                best_map = checkpoint['map']
+                best_checkpoint = checkpoint_path
+        except Exception as e:
+            print(f"Error loading checkpoint {checkpoint_path}: {e}")
+    
+    return best_checkpoint
+
+def evaluate_model(model, eval_dataloader, device='cpu'):
+    """
+    Evaluates the trained model using Dice coefficient and IoU metrics
+    
+    Args:
+        model: The trained object detection model
+        eval_dataloader: DataLoader with evaluation dataset
+        device: Device to run evaluation on
+    
+    Returns:
+        dict: Dictionary with evaluation metrics
+    """
+    model.eval()
+    print("Starting model evaluation with Dice and IoU metrics...")
+    
+    dice_scores = []
+    iou_scores = []
+    
+    with torch.no_grad():
+        for images, targets in tqdm(eval_dataloader, desc="Evaluating"):
+            images = [img.to(device) for img in images]
+            
+            # Get model predictions
+            predictions = model(images)
+            
+            # Calculate metrics for each image in the batch
+            for i, (pred, target) in enumerate(zip(predictions, targets)):
+                # Skip images with no ground truth boxes
+                if len(target['boxes']) == 0:
+                    continue
+                
+                # Skip images with no predictions
+                if len(pred['boxes']) == 0:
+                    dice_scores.append(0)
+                    iou_scores.append(0)
+                    continue
+                
+                # Get the highest confidence prediction
+                conf_scores = pred['scores']
+                if len(conf_scores) > 0:
+                    max_idx = torch.argmax(conf_scores)
+                    pred_box = pred['boxes'][max_idx].cpu()
+                    
+                    # Get the corresponding ground truth box
+                    # Assuming the first ground truth box is the main one for simplicity
+                    gt_box = target['boxes'][0].cpu()
+                    
+                    # Calculate IoU
+                    iou = box_iou(pred_box.unsqueeze(0), gt_box.unsqueeze(0)).item()
+                    iou_scores.append(iou)
+                    
+                    # Calculate Dice coefficient
+                    dice = calculate_dice_coefficient(pred_box, gt_box)
+                    dice_scores.append(dice)
+    
+    # Calculate average metrics
+    avg_dice = sum(dice_scores) / len(dice_scores) if dice_scores else 0
+    avg_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0
+    
+    results = {
+        "average_dice": avg_dice,
+        "average_iou": avg_iou,
+        "num_samples": len(iou_scores)
+    }
+    
+    print(f"Evaluation Results on {len(iou_scores)} samples:")
+    print(f"  Average Dice: {avg_dice:.4f}")
+    print(f"  Average IoU: {avg_iou:.4f}")
+    
+    return results
+
+
+def box_iou(box1, box2):
+    """
+    Calculate IoU between bounding boxes
+    
+    Args:
+        box1, box2: tensors of shape [N, 4] where each box is [x1, y1, x2, y2]
+        
+    Returns:
+        IoU tensor of shape [N, M] where N, M are number of boxes in box1, box2
+    """
+    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
+    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+    
+    # Get coordinates of intersection
+    lt = torch.max(box1[:, None, :2], box2[:, :2])  # [N,M,2]
+    rb = torch.min(box1[:, None, 2:], box2[:, 2:])  # [N,M,2]
+    
+    # Calculate intersection area
+    wh = (rb - lt).clamp(min=0)  # [N,M,2]
+    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+    
+    # Calculate IoU
+    union = area1[:, None] + area2 - inter
+    iou = inter / union
+    
+    return iou
+
+
+def calculate_dice_coefficient(box1, box2):
+    """
+    Calculate Dice coefficient between bounding boxes
+    
+    Args:
+        box1, box2: tensors of shape [4] representing [x1, y1, x2, y2]
+        
+    Returns:
+        float: Dice coefficient
+    """
+    # Calculate areas
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    # Get coordinates of intersection
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    # Calculate intersection area
+    w = max(0, x2 - x1)
+    h = max(0, y2 - y1)
+    intersection = w * h
+    
+    # Calculate Dice coefficient: 2*|A∩B|/(|A|+|B|)
+    dice = (2.0 * intersection) / (area1 + area2)
+    
+    return dice
+
+def create_evaluation_dataset(annotations_path, images_base_path, transform=None):
+    """
+    Creates a separate evaluation dataset distinct from training and testing sets
+    """
+    # Load annotations
+    with open(annotations_path, 'r') as f:
+        annotations_data = json.load(f)
+    
+    # Collect all unique user IDs
+    all_users = list(set(anno['user_id'] for anno in annotations_data.values()))
+    
+    # Set a specific seed for reproducibility
+    random.seed(99)  # Using a different seed from your train/test split
+    random.shuffle(all_users)
+    
+    # Divide users into train (70%), test (15%), and evaluation (15%) sets
+    train_split = int(len(all_users) * 0.7)
+    test_split = int(len(all_users) * 0.85)
+    
+    train_users = set(all_users[:train_split])
+    test_users = set(all_users[train_split:test_split])
+    eval_users = set(all_users[test_split:])
+    
+    print(f"Total users: {len(all_users)}")
+    print(f"Training users: {len(train_users)}")
+    print(f"Testing users: {len(test_users)}")
+    print(f"Evaluation users: {len(eval_users)}")
+    
+    # Create evaluation dataset
+    eval_dataset = GestureDatasetEval(
+        annotations_path=annotations_path,
+        images_base_path=images_base_path,
+        eval_users=eval_users,
+        transform=transform
+    )
+    
+    return eval_dataset
+
+
+class GestureDatasetEval(torch.utils.data.Dataset):
+    """
+    Dataset specifically for evaluation, based on GestureDataset but using designated evaluation users
+    """
+    def __init__(self, annotations_path, images_base_path, eval_users, transform=None):
+        self.transform = transform
+        self.annotations_path = annotations_path
+        self.images_base_path = images_base_path
+        self.eval_users = eval_users
+
+        # Mapowanie nazw klas na ich indeksy
+        self.labels = {label: idx + 1 for idx, label in enumerate(class_names)}
+
+        # Wczytaj adnotacje
+        with open(annotations_path, 'r') as f:
+            self.annotations_data = json.load(f)
+
+        # Przetwórz adnotacje z pliku JSON
+        self.samples = self._prepare_dataset()
+        print(f"Created evaluation dataset with {len(self.samples)} samples")
+
+        # Wypisz kilka pierwszych przykładów
+        if len(self.samples) > 0:
+            print("Sample evaluation data entries:")
+            for i in range(min(3, len(self.samples))):
+                print(f"  Sample {i + 1}: {self.samples[i]}")
+
+    def _prepare_dataset(self):
+        """Przetwarza adnotacje do formatu używanego przez dataset"""
+        samples = []
+
+        # Dla każdego ID obrazu w adnotacjach
+        for img_id, anno in self.annotations_data.items():
+            if anno['user_id'] not in self.eval_users:
+                continue
+
+            # Znajdź ścieżkę do obrazu
+            img_found = False
+            img_path = None
+
+            # Szukaj obrazu we wszystkich podkatalogach
+            for subdir in os.listdir(self.images_base_path):
+                subdir_path = os.path.join(self.images_base_path, subdir)
+                if not os.path.isdir(subdir_path):
+                    continue
+
+                for ext in FORMATS:
+                    potential_path = os.path.join(subdir_path, f"{img_id}{ext}")
+                    if os.path.exists(potential_path):
+                        img_path = potential_path
+                        img_found = True
+                        break
+
+                if img_found:
+                    break
+
+            if not img_found:
+                # Spróbuj znaleźć bezpośrednio w głównym katalogu
+                for ext in FORMATS:
+                    potential_path = os.path.join(self.images_base_path, f"{img_id}{ext}")
+                    if os.path.exists(potential_path):
+                        img_path = potential_path
+                        img_found = True
+                        break
+
+            if not img_found:
+                continue
+
+            # Dodaj próbkę dla każdego bounding box
+            for box_idx, (box, label) in enumerate(zip(anno['bboxes'], anno['labels'])):
+                samples.append({
+                    'image_id': img_id,
+                    'image_path': img_path,
+                    'bbox': box,
+                    'label': label,
+                    'user_id': anno['user_id']
+                })
+
+        return samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        # Same as GestureDataset.__getitem__
+        sample = self.samples[idx]
+
+        try:
+            image = Image.open(sample['image_path']).convert('RGB')
+        except Exception as e:
+            print(f"Error loading image {sample['image_path']}: {e}")
+            image = Image.new('RGB', (100, 100))
+
+        width, height = image.size
+
+        x, y, w, h = sample['bbox']
+        x1, y1 = x * width, y * height
+        x2, y2 = (x + w) * width, (y + h) * height
+
+        label_idx = self.labels.get(sample['label'], 0)
+
+        boxes = torch.tensor([[x1, y1, x2, y2]], dtype=torch.float32)
+        labels = torch.tensor([label_idx], dtype=torch.int64)
+
+        if self.transform:
+            image = self.transform(image)
+
+        target = {
+            'boxes': boxes,
+            'labels': labels,
+            'image_id': torch.tensor([idx]),
+        }
+
+        return image, target
 
 
 if __name__ == "__main__":
