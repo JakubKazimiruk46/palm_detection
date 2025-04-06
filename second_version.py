@@ -1,38 +1,24 @@
-import os
 import json
-import logging
+import os
 import random
-from tqdm import tqdm
-from collections import defaultdict
-from typing import Tuple, List, Dict, Any
-from glob import glob
-
-import pandas as pd
-import numpy as np
-
-from PIL import Image, ImageOps
-import cv2
-
-import torch
-from torch import nn, Tensor
-from torchvision import models
-from torchvision.transforms import Compose
-from torchvision.transforms import functional as F
-from torchvision import transforms as T
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-import matplotlib.pyplot as plt
 import warnings
+from glob import glob
+from dataclasses import dataclass
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torchvision import models
+from torchvision import transforms as T
+from tqdm import tqdm
+import multiprocessing
 
-
-
-
-
-
+IOU_THRESHOLDS = [0.3]
 
 warnings.filterwarnings('ignore')
 
 # Add these lines for Windows multiprocessing support
-import multiprocessing
 
 multiprocessing.freeze_support()
 
@@ -46,6 +32,17 @@ transform = T.Compose([
     T.ToTensor(),
     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
+
+
+@dataclass
+class Config:
+    enable_training: bool = False
+    annotations_path: str = 'annotations.json'
+    images_base_path: str = 'images'
+    checkpoint_dir: str = 'checkpoints'
+    batch_size: int = 16
+    num_epochs: int = 30
+    num_visualizations: int = 5
 
 
 class GestureDataset(torch.utils.data.Dataset):
@@ -92,37 +89,8 @@ class GestureDataset(torch.utils.data.Dataset):
             if anno['user_id'] not in target_users:
                 continue
 
-            # Sprawdź, czy plik obrazu istnieje
-            img_found = False
-            img_path = None
-
-            # Szukaj pliku we wszystkich podkatalogach images_base_path
-            for subdir in os.listdir(self.images_base_path):
-                subdir_path = os.path.join(self.images_base_path, subdir)
-                if not os.path.isdir(subdir_path):
-                    continue
-
-                for ext in FORMATS:
-                    potential_path = os.path.join(subdir_path, f"{img_id}{ext}")
-                    if os.path.exists(potential_path):
-                        img_path = potential_path
-                        img_found = True
-                        break
-
-                if img_found:
-                    break
-
-            if not img_found:
-                # Spróbuj znaleźć plik bezpośrednio w katalogu bazowym
-                for ext in FORMATS:
-                    potential_path = os.path.join(self.images_base_path, f"{img_id}{ext}")
-                    if os.path.exists(potential_path):
-                        img_path = potential_path
-                        img_found = True
-                        break
-
-            if not img_found:
-                # Nie znaleziono obrazu - pomijamy tę adnotację
+            img_path = find_image_path(img_id, self.images_base_path)
+            if img_path is None:
                 continue
 
             # Dla każdego bounding boxa w adnotacji
@@ -185,14 +153,7 @@ def collate_fn(batch):
     """
     Funkcja collate_fn dla DataLoader, obsługująca przypadki z różnymi rozmiarami bounding boxów
     """
-    images = []
-    targets = []
-
-    for img, tgt in batch:
-        images.append(img)
-        targets.append(tgt)
-
-    return images, targets
+    return list(zip(*batch))
 
 
 def create_datasets(images_base_path='images', annotations_path='annotations.json'):
@@ -341,7 +302,7 @@ def train_model(model, train_dataloader, test_dataloader, num_epochs=30, device=
         # Użyj Mean Average Precision jako metryki
         # metric = MeanAveragePrecision()
         # Łagodniejsze dla testów
-        metric = MeanAveragePrecision(iou_thresholds=[0.3])
+        metric = MeanAveragePrecision(iou_thresholds=IOU_THRESHOLDS)
 
         with torch.no_grad():
             for images, targets in tqdm(test_dataloader, desc="Evaluating"):
@@ -375,130 +336,118 @@ def train_model(model, train_dataloader, test_dataloader, num_epochs=30, device=
     return model
 
 
-def main():
-    # Ustawienia
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    # Set training flag - change to False to skip training
-    do_training = False  # Set this to False to skip training
-    
-    # Sprawdź, czy istnieje katalog train i test
-    images_base_path = 'images'  # Ścieżka do katalogu z obrazami
-    annotations_path = 'annotations.json'  # Ścieżka do pliku z adnotacjami
-
-    if not os.path.exists(images_base_path):
-        print(f"Error: Directory {images_base_path} does not exist!")
-        return
-        
-    # Inicjalizuj model
-    model = initialize_model(num_classes=len(class_names))
-    
-    if do_training:
-        # Training code - only execute if do_training is True
-        try:
-            # Utwórz zbiory danych
-            train_dataset, test_dataset = create_datasets(
-                images_base_path=images_base_path,
-                annotations_path=annotations_path
-            )
-
-            if len(train_dataset) == 0:
-                print("Error: Training dataset is empty!")
-                return
-
-            if len(test_dataset) == 0:
-                print("Error: Test dataset is empty!")
-                return
-
-            # Utwórz data loadery
-            train_dataloader, test_dataloader = create_dataloaders(
-                train_dataset,
-                test_dataset
-            )
-
-            # Trenuj model
-            trained_model = train_model(
-                model=model,
-                train_dataloader=train_dataloader,
-                test_dataloader=test_dataloader,
-                num_epochs=30,
-                device=device
-            )
-
-            print("Training completed successfully!")
-        except Exception as e:
-            print(f"An error occurred during training: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-    else:
-        print("Skipping training phase, using saved checkpoint for evaluation.")
-    
+def perform_training(model, config: Config, device):
     try:
-        # Znajdź najlepszy model na podstawie mAP z walidacji
+        train_dataset, test_dataset = create_datasets(
+            images_base_path=config.images_base_path,
+            annotations_path=config.annotations_path
+        )
+
+        if len(train_dataset) == 0:
+            print("Error: Training dataset is empty!")
+            return
+        if len(test_dataset) == 0:
+            print("Error: Test dataset is empty!")
+            return
+
+        train_dataloader, test_dataloader = create_dataloaders(
+            train_dataset, test_dataset
+        )
+
+        train_model(
+            model=model,
+            train_dataloader=train_dataloader,
+            test_dataloader=test_dataloader,
+            num_epochs=config.num_epochs,
+            device=device
+        )
+        print("Training completed successfully!")
+
+    except Exception as e:
+        print(f"An error occurred during training: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def perform_evaluation(model, config: Config, device):
+    try:
         print("\nFinding best checkpoint...")
-        best_checkpoint_path = find_best_checkpoint("checkpoints")
-        
+        best_checkpoint_path = find_best_checkpoint(config.checkpoint_dir)
+
         if best_checkpoint_path:
             print(f"Loading best model from {best_checkpoint_path}")
             checkpoint = torch.load(best_checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
-            best_map = checkpoint.get('map', 0)
-            print(f"Best validation mAP: {best_map:.4f}")
+            print(f"Best validation mAP: {checkpoint.get('map', 0):.4f}")
         else:
             print("No checkpoints found. Cannot proceed with evaluation.")
             return
-        
-        # Utwórz osobny zbiór ewaluacyjny
+
         print("\nCreating separate evaluation dataset...")
         eval_dataset = create_evaluation_dataset(
-            annotations_path=annotations_path,
-            images_base_path=images_base_path,
+            annotations_path=config.annotations_path,
+            images_base_path=config.images_base_path,
             transform=transform
         )
-        
+
         if len(eval_dataset) == 0:
             print("Error: Evaluation dataset is empty!")
             return
-            
-        # Utwórz data loader dla ewaluacji
+
         eval_dataloader = torch.utils.data.DataLoader(
             eval_dataset,
-            batch_size=1,  # Batch size 1 dla lepszej analizy per-image
+            batch_size=1,
             shuffle=False,
             collate_fn=collate_fn,
             num_workers=0
         )
-        
-        # Przeprowadź ewaluację z metrykami Dice i IoU
+
         print("\nEvaluating model...")
         evaluation_results = evaluate_model(
             model=model,
             eval_dataloader=eval_dataloader,
             device=device
         )
-        
-        # Zapisz wyniki ewaluacji
-        results_file = 'evaluation_results.json'
-        with open(results_file, 'w') as f:
+
+        with open('evaluation_results.json', 'w') as f:
             json.dump(evaluation_results, f, indent=4)
-        print(f"Evaluation results saved to {results_file}")
-        
-        # Wizualizuj przykładowe predykcje
+        print(f"Evaluation results saved to evaluation_results.json")
+
         print("\nGenerating visualization of predictions...")
-        os.makedirs('visualization', exist_ok=True)
         visualize_predictions(
             model=model,
             eval_dataloader=eval_dataloader,
             device=device,
-            num_samples=5  # Liczba obrazów do wizualizacji
+            num_samples=config.num_visualizations
         )
 
     except Exception as e:
         print(f"An error occurred during evaluation: {e}")
         import traceback
         traceback.print_exc()
+
+
+def main():
+    config = Config()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    if not os.path.exists(config.images_base_path):
+        print(f"Error: Directory {config.images_base_path} does not exist!")
+        return
+
+    # Inicjalizuj model
+    model = initialize_model(num_classes=len(class_names))
+
+    if config.enable_training:
+        # Training code - only execute if do_training is True
+        perform_training(model, config, device)
+    else:
+        print("Skipping training phase, using saved checkpoint for evaluation.")
+
+    perform_evaluation(model, config, device)
+
 
 def find_best_checkpoint(checkpoint_dir):
     """
@@ -507,16 +456,16 @@ def find_best_checkpoint(checkpoint_dir):
     if not os.path.exists(checkpoint_dir):
         print(f"Checkpoint directory {checkpoint_dir} does not exist")
         return None
-        
+
     checkpoints = glob(os.path.join(checkpoint_dir, "*.pth"))
-    
+
     if not checkpoints:
         print("No checkpoints found")
         return None
-    
+
     best_map = -1
     best_checkpoint = None
-    
+
     for checkpoint_path in checkpoints:
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -525,71 +474,73 @@ def find_best_checkpoint(checkpoint_dir):
                 best_checkpoint = checkpoint_path
         except Exception as e:
             print(f"Error loading checkpoint {checkpoint_path}: {e}")
-    
+
     return best_checkpoint
+
+
 def evaluate_model(model, eval_dataloader, device='cpu'):
     """
     Evaluates the trained model using Dice coefficient and IoU metrics
     """
     model.eval()
     print("Starting model evaluation with Dice and IoU metrics...")
-    
+
     dice_scores = []
     iou_scores = []
-    
+
     with torch.no_grad():
         for images, targets in tqdm(eval_dataloader, desc="Evaluating"):
             images = [img.to(device) for img in images]
-            
+
             # Get model predictions
             predictions = model(images)
-            
+
             # Calculate metrics for each image in the batch
             for i, (pred, target) in enumerate(zip(predictions, targets)):
                 # Skip images with no ground truth boxes
                 if len(target['boxes']) == 0:
                     continue
-                
+
                 # Skip images with no predictions
                 if len(pred['boxes']) == 0:
                     dice_scores.append(0)
                     iou_scores.append(0)
                     continue
-                
+
                 # Get the highest confidence prediction
                 conf_scores = pred['scores']
                 if len(conf_scores) > 0:
                     max_idx = torch.argmax(conf_scores)
                     pred_box = pred['boxes'][max_idx].cpu()
-                    
+
                     # Get the corresponding ground truth box
                     gt_box = target['boxes'][0].cpu()
-                    
+
                     # Calculate IoU
                     iou = box_iou(pred_box.unsqueeze(0), gt_box.unsqueeze(0)).item()
                     iou_scores.append(iou)
-                    
+
                     # Calculate Dice coefficient
                     dice = calculate_dice_coefficient(pred_box, gt_box)
                     dice_scores.append(dice)
-    
+
     # Calculate average metrics
     avg_dice = sum(dice_scores) / len(dice_scores) if dice_scores else 0
     avg_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0
-    
+
     # Use Python native types for all values in the results dictionary
     results = {
         "average_dice": float(avg_dice),  # Convert to Python float
-        "average_iou": float(avg_iou),    # Convert to Python float
-        "num_samples": len(iou_scores),   # Already a Python int
+        "average_iou": float(avg_iou),  # Convert to Python float
+        "num_samples": len(iou_scores),  # Already a Python int
         "all_dice_scores": [float(score) for score in dice_scores],  # Convert list of values to float
-        "all_iou_scores": [float(score) for score in iou_scores]     # Convert list of values to float
+        "all_iou_scores": [float(score) for score in iou_scores]  # Convert list of values to float
     }
-    
+
     print(f"Evaluation Results on {len(iou_scores)} samples:")
     print(f"  Average Dice: {avg_dice:.4f}")
     print(f"  Average IoU: {avg_iou:.4f}")
-    
+
     return results
 
 
@@ -605,19 +556,19 @@ def box_iou(box1, box2):
     """
     area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
     area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
-    
+
     # Get coordinates of intersection
     lt = torch.max(box1[:, None, :2], box2[:, :2])  # [N,M,2]
     rb = torch.min(box1[:, None, 2:], box2[:, 2:])  # [N,M,2]
-    
+
     # Calculate intersection area
     wh = (rb - lt).clamp(min=0)  # [N,M,2]
     inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
-    
+
     # Calculate IoU
     union = area1[:, None] + area2 - inter
     iou = inter / union
-    
+
     return iou
 
 
@@ -634,22 +585,23 @@ def calculate_dice_coefficient(box1, box2):
     # Calculate areas
     area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
     area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    
+
     # Get coordinates of intersection
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
     x2 = min(box1[2], box2[2])
     y2 = min(box1[3], box2[3])
-    
+
     # Calculate intersection area
     w = max(0, x2 - x1)
     h = max(0, y2 - y1)
     intersection = w * h
-    
+
     # Calculate Dice coefficient: 2*|A∩B|/(|A|+|B|)
     dice = (2.0 * intersection) / (area1 + area2)
-    
+
     return dice
+
 
 def create_evaluation_dataset(annotations_path, images_base_path, transform=None):
     """
@@ -658,27 +610,27 @@ def create_evaluation_dataset(annotations_path, images_base_path, transform=None
     # Load annotations
     with open(annotations_path, 'r') as f:
         annotations_data = json.load(f)
-    
+
     # Collect all unique user IDs
     all_users = list(set(anno['user_id'] for anno in annotations_data.values()))
-    
+
     # Set a specific seed for reproducibility
     random.seed(99)  # Using a different seed from your train/test split
     random.shuffle(all_users)
-    
+
     # Divide users into train (70%), test (15%), and evaluation (15%) sets
     train_split = int(len(all_users) * 0.7)
     test_split = int(len(all_users) * 0.85)
-    
+
     train_users = set(all_users[:train_split])
     test_users = set(all_users[train_split:test_split])
     eval_users = set(all_users[test_split:])
-    
+
     print(f"Total users: {len(all_users)}")
     print(f"Training users: {len(train_users)}")
     print(f"Testing users: {len(test_users)}")
     print(f"Evaluation users: {len(eval_users)}")
-    
+
     # Create evaluation dataset
     eval_dataset = GestureDatasetEval(
         annotations_path=annotations_path,
@@ -686,7 +638,7 @@ def create_evaluation_dataset(annotations_path, images_base_path, transform=None
         eval_users=eval_users,
         transform=transform
     )
-    
+
     return eval_dataset
 
 
@@ -694,6 +646,7 @@ class GestureDatasetEval(torch.utils.data.Dataset):
     """
     Dataset specifically for evaluation, based on GestureDataset but using designated evaluation users
     """
+
     def __init__(self, annotations_path, images_base_path, eval_users, transform=None):
         self.transform = transform
         self.annotations_path = annotations_path
@@ -727,35 +680,8 @@ class GestureDatasetEval(torch.utils.data.Dataset):
                 continue
 
             # Znajdź ścieżkę do obrazu
-            img_found = False
-            img_path = None
-
-            # Szukaj obrazu we wszystkich podkatalogach
-            for subdir in os.listdir(self.images_base_path):
-                subdir_path = os.path.join(self.images_base_path, subdir)
-                if not os.path.isdir(subdir_path):
-                    continue
-
-                for ext in FORMATS:
-                    potential_path = os.path.join(subdir_path, f"{img_id}{ext}")
-                    if os.path.exists(potential_path):
-                        img_path = potential_path
-                        img_found = True
-                        break
-
-                if img_found:
-                    break
-
-            if not img_found:
-                # Spróbuj znaleźć bezpośrednio w głównym katalogu
-                for ext in FORMATS:
-                    potential_path = os.path.join(self.images_base_path, f"{img_id}{ext}")
-                    if os.path.exists(potential_path):
-                        img_path = potential_path
-                        img_found = True
-                        break
-
-            if not img_found:
+            img_path = find_image_path(img_id, self.images_base_path)
+            if img_path is None:
                 continue
 
             # Dodaj próbkę dla każdego bounding box
@@ -804,7 +730,79 @@ class GestureDatasetEval(torch.utils.data.Dataset):
         }
 
         return image, target
-    
+
+
+def find_image_path(img_id, images_base_path):
+    for subdir in os.listdir(images_base_path):
+        subdir_path = os.path.join(images_base_path, subdir)
+        if not os.path.isdir(subdir_path):
+            continue
+        for ext in FORMATS:
+            potential_path = os.path.join(subdir_path, f"{img_id}{ext}")
+            if os.path.exists(potential_path):
+                return potential_path
+
+    # Spróbuj znaleźć bezpośrednio
+    for ext in FORMATS:
+        potential_path = os.path.join(images_base_path, f"{img_id}{ext}")
+        if os.path.exists(potential_path):
+            return potential_path
+
+    return None
+
+
+def denormalize_image(tensor_img):
+    # Convert tensor to PIL image for drawing
+    image_np = tensor_img.permute(1, 2, 0).cpu().numpy()
+    # Denormalize
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+    image_np = std * image_np + mean
+    image_np = np.clip(image_np, 0, 1)
+    return (image_np * 255).astype(np.uint8)
+
+
+def draw_boxes(ax, boxes, labels, scores=None, color='green', title=''):
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = box
+        label_text = f"Class: {class_names[labels[i] - 1]}"
+        if scores is not None:
+            label_text += f", Score: {scores[i]:.2f}"
+        ax.add_patch(plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                   fill=False, edgecolor=color, linewidth=2))
+        ax.text(x1, y1, label_text, bbox=dict(facecolor=color, alpha=0.5))
+    ax.set_title(title)
+    ax.axis('off')
+
+
+def save_visualization(image_np, gt_boxes, gt_labels, pred_boxes, pred_labels, pred_scores, sample_idx):
+    plt.figure(figsize=(12, 6))
+
+    # Ground truth
+    ax1 = plt.subplot(1, 2, 1)
+    ax1.imshow(image_np)
+    draw_boxes(ax1, gt_boxes, gt_labels, color='green', title='Ground Truth')
+
+    # Predictions
+    ax2 = plt.subplot(1, 2, 2)
+    ax2.imshow(image_np)
+    draw_boxes(ax2, pred_boxes, pred_labels, pred_scores, color='red', title='Predictions')
+
+    # Calculate and display metrics if possible
+    if len(pred_boxes) > 0 and len(gt_boxes) > 0:
+        pred_box = torch.tensor(pred_boxes[torch.argmax(torch.tensor(pred_scores))])
+        gt_box = torch.tensor(gt_boxes[0])
+        iou_val = box_iou(pred_box.unsqueeze(0), gt_box.unsqueeze(0)).item()
+        dice_val = calculate_dice_coefficient(pred_box, gt_box)
+        plt.suptitle(f"Sample {sample_idx} - IoU: {iou_val:.4f}, Dice: {dice_val:.4f}")
+
+    plt.tight_layout()
+    output_path = f'visualization/sample_{sample_idx}.png'
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved visualization for sample {sample_idx}")
+
+
 def visualize_predictions(model, eval_dataloader, device, num_samples=5):
     """
     Visualizes model predictions alongside ground truth
@@ -816,80 +814,47 @@ def visualize_predictions(model, eval_dataloader, device, num_samples=5):
         num_samples: Number of samples to visualize
     """
     model.eval()
-    
+
     # Create output directory
     os.makedirs('visualization', exist_ok=True)
-    
+
     with torch.no_grad():
         for i, (images, targets) in enumerate(eval_dataloader):
             if i >= num_samples:
                 break
-                
+
             # Get model predictions
             images_device = [img.to(device) for img in images]
             predictions = model(images_device)
-            
+
             # Process one image at a time for clarity
             for j, (image, target, pred) in enumerate(zip(images, targets, predictions)):
-                # Convert tensor to PIL image for drawing
-                image_np = image.permute(1, 2, 0).cpu().numpy()
                 # Denormalize
-                mean = np.array([0.485, 0.456, 0.406])
-                std = np.array([0.229, 0.224, 0.225])
-                image_np = std * image_np + mean
-                image_np = np.clip(image_np, 0, 1)
-                image_np = (image_np * 255).astype(np.uint8)
-                
-                # Create plot
-                plt.figure(figsize=(12, 6))
-                
-                # Plot original image with ground truth
-                plt.subplot(1, 2, 1)
-                plt.imshow(image_np)
-                plt.title('Ground Truth')
-                
-                # Draw ground truth boxes
-                for box, label in zip(target['boxes'].cpu().numpy(), target['labels'].cpu().numpy()):
-                    x1, y1, x2, y2 = box
-                    plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, 
-                                                     fill=False, edgecolor='green', linewidth=2))
-                    plt.text(x1, y1, f"Class: {class_names[label-1]}", 
-                             bbox=dict(facecolor='green', alpha=0.5))
-                
-                # Plot image with predictions
-                plt.subplot(1, 2, 2)
-                plt.imshow(image_np)
-                plt.title('Predictions')
-                
-                # Draw prediction boxes
-                for box, label, score in zip(pred['boxes'].cpu().numpy(), 
-                                             pred['labels'].cpu().numpy(),
-                                             pred['scores'].cpu().numpy()):
-                    if score > 0.5:  # Only show predictions with confidence > 0.5
-                        x1, y1, x2, y2 = box
-                        plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, 
-                                                         fill=False, edgecolor='red', linewidth=2))
-                        plt.text(x1, y1, f"Class: {class_names[label-1]}, Score: {score:.2f}", 
-                                 bbox=dict(facecolor='red', alpha=0.5))
-                
-                # Calculate metrics for this example
-                if len(pred['boxes']) > 0 and len(target['boxes']) > 0:
-                    best_pred_idx = torch.argmax(pred['scores']).item()
-                    pred_box = pred['boxes'][best_pred_idx].cpu()
-                    gt_box = target['boxes'][0].cpu()
-                    
-                    iou_val = box_iou(pred_box.unsqueeze(0), gt_box.unsqueeze(0)).item()
-                    dice_val = calculate_dice_coefficient(pred_box, gt_box)
-                    
-                    # Add metrics to the title
-                    plt.suptitle(f"Sample {i}_{j} - IoU: {iou_val:.4f}, Dice: {dice_val:.4f}")
-                
-                plt.tight_layout()
-                plt.savefig(f'visualization/sample_{i}_{j}.png')
-                plt.close()
-                
-                print(f"Saved visualization for sample {i}_{j}")
-    
+                image_np = denormalize_image(image)
+
+                gt_boxes = target['boxes'].cpu().numpy()
+                gt_labels = target['labels'].cpu().numpy()
+
+                pred_boxes = pred['boxes'].cpu().numpy()
+                pred_labels = pred['labels'].cpu().numpy()
+                pred_scores = pred['scores'].cpu().numpy()
+
+                # Filtruj tylko predykcje z wysokim score
+                mask = pred_scores > 0.5
+                pred_boxes = pred_boxes[mask]
+                pred_labels = pred_labels[mask]
+                pred_scores = pred_scores[mask]
+
+                save_visualization(
+                    image_np=image_np,
+                    gt_boxes=gt_boxes,
+                    gt_labels=gt_labels,
+                    pred_boxes=pred_boxes,
+                    pred_labels=pred_labels,
+                    pred_scores=pred_scores,
+                    sample_idx=f"{i}_{j}"
+                )
+
     print(f"Visualizations saved to 'visualization/' directory")
 
 
