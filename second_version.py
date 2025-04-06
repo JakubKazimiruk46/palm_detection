@@ -379,54 +379,76 @@ def main():
     # Ustawienia
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Set training flag - change to False to skip training
+    do_training = False  # Set this to False to skip training
+    
+    # Sprawdź, czy istnieje katalog train i test
+    images_base_path = 'images'  # Ścieżka do katalogu z obrazami
+    annotations_path = 'annotations.json'  # Ścieżka do pliku z adnotacjami
 
-    # Ustaw seed dla powtarzalności
-    torch.manual_seed(42)
-    np.random.seed(42)
-    random.seed(42)
+    if not os.path.exists(images_base_path):
+        print(f"Error: Directory {images_base_path} does not exist!")
+        return
+        
+    # Inicjalizuj model
+    model = initialize_model(num_classes=len(class_names))
+    
+    if do_training:
+        # Training code - only execute if do_training is True
+        try:
+            # Utwórz zbiory danych
+            train_dataset, test_dataset = create_datasets(
+                images_base_path=images_base_path,
+                annotations_path=annotations_path
+            )
 
+            if len(train_dataset) == 0:
+                print("Error: Training dataset is empty!")
+                return
+
+            if len(test_dataset) == 0:
+                print("Error: Test dataset is empty!")
+                return
+
+            # Utwórz data loadery
+            train_dataloader, test_dataloader = create_dataloaders(
+                train_dataset,
+                test_dataset
+            )
+
+            # Trenuj model
+            trained_model = train_model(
+                model=model,
+                train_dataloader=train_dataloader,
+                test_dataloader=test_dataloader,
+                num_epochs=30,
+                device=device
+            )
+
+            print("Training completed successfully!")
+        except Exception as e:
+            print(f"An error occurred during training: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+    else:
+        print("Skipping training phase, using saved checkpoint for evaluation.")
+    
     try:
-        # Sprawdź, czy istnieje katalog train i test
-        images_base_path = 'images'  # Ścieżka do katalogu z obrazami
-        annotations_path = 'annotations.json'  # Ścieżka do pliku z adnotacjami
-
-        if not os.path.exists(images_base_path):
-            print(f"Error: Directory {images_base_path} does not exist!")
+        # Znajdź najlepszy model na podstawie mAP z walidacji
+        print("\nFinding best checkpoint...")
+        best_checkpoint_path = find_best_checkpoint("checkpoints")
+        
+        if best_checkpoint_path:
+            print(f"Loading best model from {best_checkpoint_path}")
+            checkpoint = torch.load(best_checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            best_map = checkpoint.get('map', 0)
+            print(f"Best validation mAP: {best_map:.4f}")
+        else:
+            print("No checkpoints found. Cannot proceed with evaluation.")
             return
-
-        # Utwórz zbiory danych
-        train_dataset, test_dataset = create_datasets(
-            images_base_path=images_base_path,
-            annotations_path=annotations_path
-        )
-
-        if len(train_dataset) == 0:
-            print("Error: Training dataset is empty!")
-            return
-
-        if len(test_dataset) == 0:
-            print("Error: Test dataset is empty!")
-            return
-
-        # Utwórz data loadery
-        train_dataloader, test_dataloader = create_dataloaders(
-            train_dataset,
-            test_dataset
-        )
-
-        # Inicjalizuj model
-        model = initialize_model(num_classes=len(class_names))
-
-        # Trenuj model
-        trained_model = train_model(
-            model=model,
-            train_dataloader=train_dataloader,
-            test_dataloader=test_dataloader,
-            num_epochs=30,
-            device=device
-        )
-
-        print("Training completed successfully!")
         
         # Utwórz osobny zbiór ewaluacyjny
         print("\nCreating separate evaluation dataset...")
@@ -448,19 +470,6 @@ def main():
             collate_fn=collate_fn,
             num_workers=0
         )
-        
-        # Znajdź najlepszy model na podstawie mAP z walidacji
-        print("\nFinding best checkpoint...")
-        best_checkpoint_path = find_best_checkpoint("checkpoints")
-        
-        if best_checkpoint_path:
-            print(f"Loading best model from {best_checkpoint_path}")
-            checkpoint = torch.load(best_checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            best_map = checkpoint.get('map', 0)
-            print(f"Best validation mAP: {best_map:.4f}")
-        else:
-            print("No checkpoints found, using the last trained model")
         
         # Przeprowadź ewaluację z metrykami Dice i IoU
         print("\nEvaluating model...")
@@ -487,7 +496,7 @@ def main():
         )
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred during evaluation: {e}")
         import traceback
         traceback.print_exc()
 
@@ -518,18 +527,9 @@ def find_best_checkpoint(checkpoint_dir):
             print(f"Error loading checkpoint {checkpoint_path}: {e}")
     
     return best_checkpoint
-
 def evaluate_model(model, eval_dataloader, device='cpu'):
     """
     Evaluates the trained model using Dice coefficient and IoU metrics
-    
-    Args:
-        model: The trained object detection model
-        eval_dataloader: DataLoader with evaluation dataset
-        device: Device to run evaluation on
-    
-    Returns:
-        dict: Dictionary with evaluation metrics
     """
     model.eval()
     print("Starting model evaluation with Dice and IoU metrics...")
@@ -563,7 +563,6 @@ def evaluate_model(model, eval_dataloader, device='cpu'):
                     pred_box = pred['boxes'][max_idx].cpu()
                     
                     # Get the corresponding ground truth box
-                    # Assuming the first ground truth box is the main one for simplicity
                     gt_box = target['boxes'][0].cpu()
                     
                     # Calculate IoU
@@ -578,10 +577,13 @@ def evaluate_model(model, eval_dataloader, device='cpu'):
     avg_dice = sum(dice_scores) / len(dice_scores) if dice_scores else 0
     avg_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0
     
+    # Use Python native types for all values in the results dictionary
     results = {
-        "average_dice": avg_dice,
-        "average_iou": avg_iou,
-        "num_samples": len(iou_scores)
+        "average_dice": float(avg_dice),  # Convert to Python float
+        "average_iou": float(avg_iou),    # Convert to Python float
+        "num_samples": len(iou_scores),   # Already a Python int
+        "all_dice_scores": [float(score) for score in dice_scores],  # Convert list of values to float
+        "all_iou_scores": [float(score) for score in iou_scores]     # Convert list of values to float
     }
     
     print(f"Evaluation Results on {len(iou_scores)} samples:")
@@ -802,6 +804,93 @@ class GestureDatasetEval(torch.utils.data.Dataset):
         }
 
         return image, target
+    
+def visualize_predictions(model, eval_dataloader, device, num_samples=5):
+    """
+    Visualizes model predictions alongside ground truth
+    
+    Args:
+        model: The trained object detection model
+        eval_dataloader: DataLoader with evaluation dataset
+        device: Device to run inference on
+        num_samples: Number of samples to visualize
+    """
+    model.eval()
+    
+    # Create output directory
+    os.makedirs('visualization', exist_ok=True)
+    
+    with torch.no_grad():
+        for i, (images, targets) in enumerate(eval_dataloader):
+            if i >= num_samples:
+                break
+                
+            # Get model predictions
+            images_device = [img.to(device) for img in images]
+            predictions = model(images_device)
+            
+            # Process one image at a time for clarity
+            for j, (image, target, pred) in enumerate(zip(images, targets, predictions)):
+                # Convert tensor to PIL image for drawing
+                image_np = image.permute(1, 2, 0).cpu().numpy()
+                # Denormalize
+                mean = np.array([0.485, 0.456, 0.406])
+                std = np.array([0.229, 0.224, 0.225])
+                image_np = std * image_np + mean
+                image_np = np.clip(image_np, 0, 1)
+                image_np = (image_np * 255).astype(np.uint8)
+                
+                # Create plot
+                plt.figure(figsize=(12, 6))
+                
+                # Plot original image with ground truth
+                plt.subplot(1, 2, 1)
+                plt.imshow(image_np)
+                plt.title('Ground Truth')
+                
+                # Draw ground truth boxes
+                for box, label in zip(target['boxes'].cpu().numpy(), target['labels'].cpu().numpy()):
+                    x1, y1, x2, y2 = box
+                    plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                                     fill=False, edgecolor='green', linewidth=2))
+                    plt.text(x1, y1, f"Class: {class_names[label-1]}", 
+                             bbox=dict(facecolor='green', alpha=0.5))
+                
+                # Plot image with predictions
+                plt.subplot(1, 2, 2)
+                plt.imshow(image_np)
+                plt.title('Predictions')
+                
+                # Draw prediction boxes
+                for box, label, score in zip(pred['boxes'].cpu().numpy(), 
+                                             pred['labels'].cpu().numpy(),
+                                             pred['scores'].cpu().numpy()):
+                    if score > 0.5:  # Only show predictions with confidence > 0.5
+                        x1, y1, x2, y2 = box
+                        plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                                         fill=False, edgecolor='red', linewidth=2))
+                        plt.text(x1, y1, f"Class: {class_names[label-1]}, Score: {score:.2f}", 
+                                 bbox=dict(facecolor='red', alpha=0.5))
+                
+                # Calculate metrics for this example
+                if len(pred['boxes']) > 0 and len(target['boxes']) > 0:
+                    best_pred_idx = torch.argmax(pred['scores']).item()
+                    pred_box = pred['boxes'][best_pred_idx].cpu()
+                    gt_box = target['boxes'][0].cpu()
+                    
+                    iou_val = box_iou(pred_box.unsqueeze(0), gt_box.unsqueeze(0)).item()
+                    dice_val = calculate_dice_coefficient(pred_box, gt_box)
+                    
+                    # Add metrics to the title
+                    plt.suptitle(f"Sample {i}_{j} - IoU: {iou_val:.4f}, Dice: {dice_val:.4f}")
+                
+                plt.tight_layout()
+                plt.savefig(f'visualization/sample_{i}_{j}.png')
+                plt.close()
+                
+                print(f"Saved visualization for sample {i}_{j}")
+    
+    print(f"Visualizations saved to 'visualization/' directory")
 
 
 if __name__ == "__main__":
