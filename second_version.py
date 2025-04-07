@@ -411,7 +411,21 @@ def perform_evaluation(model, config: Config, device):
 
         with open('evaluation_results.json', 'w') as f:
             json.dump(evaluation_results, f, indent=4)
-        print(f"Evaluation results saved to evaluation_results.json")
+
+        print(f"Evaluation results saved to {results_file}")
+
+                # Test on completely new images (optional)
+        new_images_dir = 'new_test_images'  # Change this to your folder with new images
+        if os.path.exists(new_images_dir):
+            print(f"\nTesting model on new images from {new_images_dir}...")
+            test_on_new_images(
+                model=model,
+                image_dir=new_images_dir,
+                device=device,
+                confidence_threshold=0.4  # Adjust based on your needs
+            )
+        
+        # Wizualizuj przykładowe predykcje
 
         print("\nGenerating visualization of predictions...")
         visualize_predictions(
@@ -420,6 +434,20 @@ def perform_evaluation(model, config: Config, device):
             device=device,
             num_samples=config.num_visualizations
         )
+
+        # Add this at the end of your main function
+        if os.path.exists('new_test_images'):
+            print("\nVisualizing predictions on new test images...")
+            visualize_new_images(
+                model=model,
+                image_dir='new_test_images',
+                device=device,
+                confidence_threshold=0.55  # Adjust based on your needs
+            )
+        else:
+            print("\nNo 'new_test_images' directory found. Skipping new image visualization.")
+
+
 
     except Exception as e:
         print(f"An error occurred during evaluation: {e}")
@@ -857,6 +885,154 @@ def visualize_predictions(model, eval_dataloader, device, num_samples=5):
 
     print(f"Visualizations saved to 'visualization/' directory")
 
+def test_on_new_images(model, image_dir, device='cpu', confidence_threshold=0.5):
+    """
+    Tests the model on new images without annotations
+    
+    Args:
+        model: Trained model
+        image_dir: Directory containing test images
+        device: Device to run inference on
+        confidence_threshold: Threshold for detection confidence
+    """
+    model.eval()
+    os.makedirs('inference_results', exist_ok=True)
+    
+    # Find all image files
+    image_files = []
+    for ext in FORMATS:
+        image_files.extend(glob(os.path.join(image_dir, f"*{ext}")))
+    
+    print(f"Found {len(image_files)} images to test")
+    
+    detections_by_class = {class_name: 0 for class_name in class_names}
+    
+    for img_path in tqdm(image_files, desc="Testing new images"):
+        try:
+            # Load and preprocess image
+            image = Image.open(img_path).convert('RGB')
+            image_tensor = transform(image).to(device)
+            
+            # Run inference
+            with torch.no_grad():
+                prediction = model([image_tensor])[0]
+            
+            # Convert image for visualization
+            image_np = np.array(image)
+            
+            # Create visualization
+            plt.figure(figsize=(10, 8))
+            plt.imshow(image_np)
+            plt.title(f"Predictions for {os.path.basename(img_path)}")
+            
+            # Draw predictions
+            found_detections = False
+            for box, label, score in zip(prediction['boxes'].cpu().numpy(), 
+                                        prediction['labels'].cpu().numpy(),
+                                        prediction['scores'].cpu().numpy()):
+                if score > confidence_threshold:
+                    found_detections = True
+                    class_name = class_names[label-1]
+                    detections_by_class[class_name] += 1
+                    
+                    x1, y1, x2, y2 = box
+                    plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                                    fill=False, edgecolor='red', linewidth=2))
+                    plt.text(x1, y1, f"{class_name}: {score:.2f}", 
+                            bbox=dict(facecolor='red', alpha=0.5))
+            
+            if not found_detections:
+                plt.text(10, 30, f"No detections with score > {confidence_threshold}", 
+                        bbox=dict(facecolor='red', alpha=0.5))
+            
+            # Save result
+            output_path = os.path.join('inference_results', os.path.basename(img_path))
+            plt.tight_layout()
+            plt.savefig(output_path)
+            plt.close()
+            
+        except Exception as e:
+            print(f"Error processing {img_path}: {e}")
+    
+    print(f"Detections by class: {detections_by_class}")
+    print(f"Results saved to 'inference_results/' directory")
+
+def visualize_new_images(model, image_dir, device='cpu', confidence_threshold=0.4):
+    """
+    Visualizes model predictions on new images without annotations
+    
+    Args:
+        model: Trained object detection model
+        image_dir: Directory containing test images without annotations
+        device: Device to run inference on
+        confidence_threshold: Threshold for detection confidence
+    """
+    model.eval()
+    os.makedirs('new_images_results', exist_ok=True)
+    
+    # Find all image files
+    image_files = []
+    for ext in FORMATS:
+        image_files.extend(glob(os.path.join(image_dir, f"*{ext}")))
+    
+    print(f"Found {len(image_files)} images to visualize")
+    
+    detections_by_class = {class_name: 0 for class_name in class_names}
+    images_with_detections = 0
+    
+    for img_path in tqdm(image_files, desc="Processing new images"):
+        try:
+            # Load and preprocess image
+            original_image = Image.open(img_path).convert('RGB')
+            image_tensor = transform(original_image).to(device)
+            
+            # Run inference
+            with torch.no_grad():
+                prediction = model([image_tensor])[0]
+            
+            # Convert image for visualization
+            image_np = np.array(original_image)
+            
+            # Create visualization
+            plt.figure(figsize=(10, 8))
+            plt.imshow(image_np)
+            plt.title(f"Predictions for {os.path.basename(img_path)}")
+            
+            # Draw predictions
+            found_detections = False
+            for box, label, score in zip(prediction['boxes'].cpu().numpy(), 
+                                        prediction['labels'].cpu().numpy(),
+                                        prediction['scores'].cpu().numpy()):
+                if score > confidence_threshold:
+                    found_detections = True
+                    class_name = class_names[label-1]
+                    detections_by_class[class_name] += 1
+                    
+                    x1, y1, x2, y2 = box
+                    plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                                    fill=False, edgecolor='red', linewidth=2))
+                    plt.text(x1, y1, f"{class_name}: {score:.2f}", 
+                            bbox=dict(facecolor='red', alpha=0.5))
+            
+            if found_detections:
+                images_with_detections += 1
+            else:
+                plt.text(10, 30, f"No detections with score > {confidence_threshold}", 
+                        bbox=dict(facecolor='red', alpha=0.5))
+            
+            # Save result
+            output_path = os.path.join('new_images_results', os.path.basename(img_path))
+            plt.tight_layout()
+            plt.savefig(output_path)
+            plt.close()
+            
+        except Exception as e:
+            print(f"Error processing {img_path}: {e}")
+    
+    print(f"Detection summary:")
+    print(f"- Images with any detection: {images_with_detections}/{len(image_files)} ({images_with_detections/len(image_files)*100:.1f}%)")
+    print(f"- Detections by class: {detections_by_class}")
+    print(f"Results saved to 'new_images_results/' directory")
 
 if __name__ == "__main__":
     main()
