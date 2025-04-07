@@ -412,6 +412,8 @@ def perform_evaluation(model, config: Config, device):
         with open('evaluation_results.json', 'w') as f:
             json.dump(evaluation_results, f, indent=4)
 
+        results_file = 'evaluation_results.json'
+
         print(f"Evaluation results saved to {results_file}")
 
                 # Test on completely new images (optional)
