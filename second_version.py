@@ -13,6 +13,7 @@ from torchvision import models
 from torchvision import transforms as T
 from tqdm import tqdm
 import multiprocessing
+import cv2
 
 IOU_THRESHOLDS = [0.3]
 
@@ -475,6 +476,19 @@ def main():
         perform_training(model, config, device)
     else:
         print("Skipping training phase, using saved checkpoint for evaluation.")
+
+    if os.path.exists(config.checkpoint_dir):
+        print("\nDo you want to start live webcam detection? (y/n)")
+        choice = input().lower()
+        if choice == 'y' or choice == 'yes':
+            print("Starting live webcam detection...")
+            webcam_detection(
+                model=model,
+                device=device,
+                confidence_threshold=0.5,  # Adjust based on your model sensitivity
+                enable_fps_display=True,
+                mirror=True  # Set to True for more intuitive interaction
+            )
 
     perform_evaluation(model, config, device)
 
@@ -1035,6 +1049,127 @@ def visualize_new_images(model, image_dir, device='cpu', confidence_threshold=0.
     print(f"- Images with any detection: {images_with_detections}/{len(image_files)} ({images_with_detections/len(image_files)*100:.1f}%)")
     print(f"- Detections by class: {detections_by_class}")
     print(f"Results saved to 'new_images_results/' directory")
+
+
+
+def webcam_detection(model, device, confidence_threshold=0.5, enable_fps_display=True, mirror=True):
+    """
+    Live webcam detection for palm gestures
+    
+    Args:
+        model: Trained model for detection
+        device: Device to run inference on (CPU/CUDA)
+        confidence_threshold: Threshold for detection confidence
+        enable_fps_display: Whether to display FPS counter
+        mirror: Whether to mirror the webcam feed (for more intuitive interaction)
+    """
+    # Initialize webcam
+    cap = cv2.VideoCapture(0)  # 0 is usually the default webcam
+    
+    if not cap.isOpened():
+        print("Error: Could not open webcam")
+        return
+    
+    model.eval()
+    fps_history = []
+    
+    print("Live Palm Detection Started")
+    print("Press 'q' to quit, 'p' to pause/resume")
+    
+    paused = False
+    
+    while True:
+        # Read frame
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Failed to capture image from webcam")
+            break
+        
+        # Mirror the frame horizontally if enabled (makes interaction more intuitive)
+        if mirror:
+            frame = cv2.flip(frame, 1)
+        
+        # Create a copy for display
+        display_frame = frame.copy()
+        
+        if not paused:
+            start_time = time.time()
+            
+            # Convert BGR to RGB (OpenCV uses BGR by default)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Convert to PIL Image and apply transforms
+            pil_image = Image.fromarray(rgb_frame)
+            input_tensor = transform(pil_image).unsqueeze(0).to(device)
+            
+            # Perform detection
+            with torch.no_grad():
+                predictions = model(input_tensor)
+            
+            # Process predictions
+            pred = predictions[0]
+            boxes = pred['boxes'].cpu().numpy()
+            scores = pred['scores'].cpu().numpy()
+            labels = pred['labels'].cpu().numpy()
+            
+            # Draw bounding boxes
+            palm_detected = False
+            
+            for box, score, label in zip(boxes, scores, labels):
+                if score > confidence_threshold:
+                    x1, y1, x2, y2 = box.astype(int)
+                    class_name = class_names[label-1]
+                    
+                    # Only show palm gestures (class 'palm')
+                    if class_name == 'palm':
+                        palm_detected = True
+                        color = (0, 255, 0)  # Green for palm
+                        
+                        # Draw the rectangle and label
+                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(display_frame, f"Palm: {score:.2f}", (x1, y1-10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            # Display status message
+            status_text = "Palm Detected" if palm_detected else "No Palm Detected"
+            status_color = (0, 255, 0) if palm_detected else (0, 0, 255)
+            cv2.putText(display_frame, status_text, (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+            
+            # Calculate and display FPS
+            if enable_fps_display:
+                end_time = time.time()
+                fps = 1 / (end_time - start_time)
+                fps_history.append(fps)
+                if len(fps_history) > 30:
+                    fps_history.pop(0)
+                avg_fps = sum(fps_history) / len(fps_history)
+                
+                cv2.putText(display_frame, f"FPS: {avg_fps:.1f}", (10, 70), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        else:
+            # If paused, display a message
+            cv2.putText(display_frame, "PAUSED (Press 'p' to resume)", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        
+        # Display instruction
+        cv2.putText(display_frame, "Press 'q' to quit", (10, display_frame.shape[0] - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Display the result
+        cv2.imshow('Palm Gesture Detection', display_frame)
+        
+        # Check for keypresses
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):  # Quit
+            break
+        elif key == ord('p'):  # Pause/Resume
+            paused = not paused
+    
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Webcam detection stopped")
 
 if __name__ == "__main__":
     main()
