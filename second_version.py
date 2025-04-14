@@ -14,6 +14,8 @@ from torchvision import transforms as T
 from tqdm import tqdm
 import multiprocessing
 import cv2
+import time
+import torchvision.ops
 
 IOU_THRESHOLDS = [0.3]
 
@@ -1052,31 +1054,74 @@ def visualize_new_images(model, image_dir, device='cpu', confidence_threshold=0.
 
 
 
-def webcam_detection(model, device, confidence_threshold=0.5, enable_fps_display=True, mirror=True):
+def webcam_detection(model, device, confidence_threshold=0.3, enable_fps_display=True, mirror=True):
     """
-    Live webcam detection for palm gestures
-    
-    Args:
-        model: Trained model for detection
-        device: Device to run inference on (CPU/CUDA)
-        confidence_threshold: Threshold for detection confidence
-        enable_fps_display: Whether to display FPS counter
-        mirror: Whether to mirror the webcam feed (for more intuitive interaction)
+    Live webcam detection for palm gestures with proper filtering
     """
     # Initialize webcam
-    cap = cv2.VideoCapture(0)  # 0 is usually the default webcam
+    cap = cv2.VideoCapture(0)
     
     if not cap.isOpened():
         print("Error: Could not open webcam")
         return
     
     model.eval()
+    model = model.to(device)
+    print(f"Model on device: {next(model.parameters()).device}")
+    
     fps_history = []
     
     print("Live Palm Detection Started")
-    print("Press 'q' to quit, 'p' to pause/resume")
+    print(f"Using confidence threshold: {confidence_threshold}")
+    print("Press 'q' to quit, 'p' to pause/resume, '+'/'-' to adjust threshold")
     
     paused = False
+    
+    # Function to filter and apply NMS to predictions
+    def filter_predictions(prediction, confidence_threshold=0.3, nms_threshold=0.45):
+        # Get prediction components
+        boxes = prediction['boxes'].cpu()
+        scores = prediction['scores'].cpu()
+        labels = prediction['labels'].cpu()
+        
+        # Filter by confidence
+        mask = scores > confidence_threshold
+        boxes = boxes[mask]
+        scores = scores[mask]
+        labels = labels[mask]
+        
+        # Apply NMS for each class separately
+        result_boxes = []
+        result_scores = []
+        result_labels = []
+        
+        # Process each class
+        for class_id in torch.unique(labels):
+            class_mask = labels == class_id
+            if not any(class_mask):
+                continue
+                
+            class_boxes = boxes[class_mask]
+            class_scores = scores[class_mask]
+            
+            # Apply NMS
+            keep_indices = torchvision.ops.nms(class_boxes, class_scores, nms_threshold)
+            
+            # Keep top 5 detections max
+            keep_indices = keep_indices[:5]
+            
+            result_boxes.append(class_boxes[keep_indices])
+            result_scores.append(class_scores[keep_indices])
+            result_labels.append(torch.full((len(keep_indices),), class_id))
+        
+        # Combine results from all classes
+        if result_boxes:
+            result_boxes = torch.cat(result_boxes)
+            result_scores = torch.cat(result_scores)
+            result_labels = torch.cat(result_labels)
+            return result_boxes, result_scores, result_labels
+        else:
+            return torch.tensor([]), torch.tensor([]), torch.tensor([])
     
     while True:
         # Read frame
@@ -1085,61 +1130,71 @@ def webcam_detection(model, device, confidence_threshold=0.5, enable_fps_display
             print("Error: Failed to capture image from webcam")
             break
         
-        # Mirror the frame horizontally if enabled (makes interaction more intuitive)
         if mirror:
             frame = cv2.flip(frame, 1)
         
-        # Create a copy for display
         display_frame = frame.copy()
         
         if not paused:
             start_time = time.time()
             
-            # Convert BGR to RGB (OpenCV uses BGR by default)
+            # Process frame
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Convert to PIL Image and apply transforms
             pil_image = Image.fromarray(rgb_frame)
             input_tensor = transform(pil_image).unsqueeze(0).to(device)
             
             # Perform detection
             with torch.no_grad():
-                predictions = model(input_tensor)
-            
-            # Process predictions
-            pred = predictions[0]
-            boxes = pred['boxes'].cpu().numpy()
-            scores = pred['scores'].cpu().numpy()
-            labels = pred['labels'].cpu().numpy()
-            
-            # Draw bounding boxes
-            palm_detected = False
-            
-            for box, score, label in zip(boxes, scores, labels):
-                if score > confidence_threshold:
-                    x1, y1, x2, y2 = box.astype(int)
-                    class_name = class_names[label-1]
+                try:
+                    predictions = model(input_tensor)
+                    pred = predictions[0]
                     
-                    # Only show palm gestures (class 'palm')
-                    if class_name == 'palm':
-                        palm_detected = True
-                        color = (0, 255, 0)  # Green for palm
+                    # Apply filtering and NMS
+                    filtered_boxes, filtered_scores, filtered_labels = filter_predictions(
+                        pred, confidence_threshold, nms_threshold=0.45
+                    )
+                    
+                    # Print detection info
+                    if len(filtered_scores) > 0:
+                        print(f"Filtered detections: {len(filtered_scores)}")
+                        for i in range(len(filtered_scores)):
+                            label = filtered_labels[i].item()
+                            print(f"  {class_names[label-1]}: {filtered_scores[i].item():.4f}")
+                    
+                    # Draw filtered detections
+                    palm_detected = False
+                    for i in range(len(filtered_boxes)):
+                        box = filtered_boxes[i].numpy()
+                        score = filtered_scores[i].item()
+                        label = filtered_labels[i].item()
+                        class_name = class_names[label-1]
                         
-                        # Draw the rectangle and label
+                        x1, y1, x2, y2 = box.astype(int)
+                        
+                        # Use different colors for different classes
+                        if class_name == 'palm':
+                            color = (0, 255, 0)  # Green for palm
+                            palm_detected = True
+                        else:
+                            color = (0, 0, 255)  # Red for no_gesture
+                        
                         cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-                        cv2.putText(display_frame, f"Palm: {score:.2f}", (x1, y1-10), 
+                        cv2.putText(display_frame, f"{class_name}: {score:.2f}", (x1, y1-10), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            
-            # Display status message
-            status_text = "Palm Detected" if palm_detected else "No Palm Detected"
-            status_color = (0, 255, 0) if palm_detected else (0, 0, 255)
-            cv2.putText(display_frame, status_text, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                    
+                    # Display status message
+                    status_text = "Palm Detected" if palm_detected else "No Palm Detected"
+                    status_color = (0, 255, 0) if palm_detected else (0, 0, 255)
+                    cv2.putText(display_frame, status_text, (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                    
+                except Exception as e:
+                    print(f"Error during inference: {e}")
             
             # Calculate and display FPS
             if enable_fps_display:
                 end_time = time.time()
-                fps = 1 / (end_time - start_time)
+                fps = 1 / (end_time - start_time + 1e-6)
                 fps_history.append(fps)
                 if len(fps_history) > 30:
                     fps_history.pop(0)
@@ -1149,12 +1204,12 @@ def webcam_detection(model, device, confidence_threshold=0.5, enable_fps_display
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         else:
             # If paused, display a message
-            cv2.putText(display_frame, "PAUSED (Press 'p' to resume)", (10, 30), 
+            cv2.putText(display_frame, "PAUSED", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         
-        # Display instruction
-        cv2.putText(display_frame, "Press 'q' to quit", (10, display_frame.shape[0] - 10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Show threshold
+        cv2.putText(display_frame, f"Threshold: {confidence_threshold:.2f}", (10, 110), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         # Display the result
         cv2.imshow('Palm Gesture Detection', display_frame)
@@ -1165,11 +1220,50 @@ def webcam_detection(model, device, confidence_threshold=0.5, enable_fps_display
             break
         elif key == ord('p'):  # Pause/Resume
             paused = not paused
+        elif key == ord('+') or key == ord('='):  # Increase threshold
+            confidence_threshold = min(confidence_threshold + 0.05, 1.0)
+            print(f"Increased threshold to {confidence_threshold:.2f}")
+        elif key == ord('-') or key == ord('_'):  # Decrease threshold
+            confidence_threshold = max(confidence_threshold - 0.05, 0.05)
+            print(f"Decreased threshold to {confidence_threshold:.2f}")
     
     # Release resources
     cap.release()
     cv2.destroyAllWindows()
     print("Webcam detection stopped")
+
+def run_webcam_detection():
+    """Run webcam detection with the trained model"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Initialize model
+    model = initialize_model(num_classes=len(class_names))
+    
+    # Find and load the best checkpoint
+    checkpoint_path = find_best_checkpoint("checkpoints")
+    if checkpoint_path:
+        print(f"Loading model from {checkpoint_path}")
+        # Load with explicit device mapping
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Move model to device first
+        model = model.to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Verify model is on the correct device
+        print(f"Model loaded successfully. First parameter device: {next(model.parameters()).device}")
+        
+        # Run webcam detection with a lower threshold
+        webcam_detection(
+            model=model,
+            device=device,
+            confidence_threshold=0.3,  # Lower threshold to see more detections
+            enable_fps_display=True,
+            mirror=True
+        )
+    else:
+        print("No model checkpoint found. Please train the model first.")
 
 if __name__ == "__main__":
     main()
