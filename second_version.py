@@ -39,7 +39,7 @@ transform = T.Compose([
 
 @dataclass
 class Config:
-    enable_training: bool = False
+    enable_training: bool = True
     annotations_path: str = 'annotations.json'
     images_base_path: str = 'images'
     checkpoint_dir: str = 'checkpoints'
