@@ -469,15 +469,12 @@ def main():
         print(f"Error: Directory {config.images_base_path} does not exist!")
         return
 
-    # Initialize model
     model = initialize_model(num_classes=len(class_names))
-    model = model.to(device)  # Move to device immediately
+    model = model.to(device) 
     
-    # If training is enabled, train the model
     if config.enable_training:
         perform_training(model, config, device)
-    
-    # Always load the best checkpoint (whether we just trained or not)
+    #Szukamy checkpointa PRZED kamerką
     best_checkpoint_path = find_best_checkpoint(config.checkpoint_dir)
     if best_checkpoint_path:
         print(f"Loading best model from {best_checkpoint_path}")
@@ -487,7 +484,6 @@ def main():
     else:
         print("Warning: No checkpoints found. Using initialized model.")
     
-    # Ask for webcam detection
     if os.path.exists(config.checkpoint_dir):
         print("\nDo you want to start live webcam detection? (y/n)")
         choice = input().lower()
@@ -496,12 +492,11 @@ def main():
             webcam_detection(
                 model=model,
                 device=device,
-                confidence_threshold=0.65,  # Adjust based on your model
+                confidence_threshold=0.65, 
                 enable_fps_display=True,
                 mirror=True
             )
-    
-    # Run evaluation if needed
+
     print("\nDo you want to run evaluation? (y/n)")
     choice = input().lower()
     if choice == 'y' or choice == 'yes':
