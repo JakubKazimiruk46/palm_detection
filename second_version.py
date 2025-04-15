@@ -39,12 +39,12 @@ transform = T.Compose([
 
 @dataclass
 class Config:
-    enable_training: bool = True
+    enable_training: bool = False
     annotations_path: str = 'annotations.json'
     images_base_path: str = 'images'
     checkpoint_dir: str = 'checkpoints'
-    batch_size: int = 16
-    num_epochs: int = 30
+    batch_size: int = 32
+    num_epochs: int = 100
     num_visualizations: int = 5
 
 
@@ -462,7 +462,6 @@ def perform_evaluation(model, config: Config, device):
 
 def main():
     config = Config()
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -470,15 +469,25 @@ def main():
         print(f"Error: Directory {config.images_base_path} does not exist!")
         return
 
-    # Inicjalizuj model
+    # Initialize model
     model = initialize_model(num_classes=len(class_names))
-
+    model = model.to(device)  # Move to device immediately
+    
+    # If training is enabled, train the model
     if config.enable_training:
-        # Training code - only execute if do_training is True
         perform_training(model, config, device)
+    
+    # Always load the best checkpoint (whether we just trained or not)
+    best_checkpoint_path = find_best_checkpoint(config.checkpoint_dir)
+    if best_checkpoint_path:
+        print(f"Loading best model from {best_checkpoint_path}")
+        checkpoint = torch.load(best_checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Best validation mAP: {checkpoint.get('map', 0):.4f}")
     else:
-        print("Skipping training phase, using saved checkpoint for evaluation.")
-
+        print("Warning: No checkpoints found. Using initialized model.")
+    
+    # Ask for webcam detection
     if os.path.exists(config.checkpoint_dir):
         print("\nDo you want to start live webcam detection? (y/n)")
         choice = input().lower()
@@ -487,12 +496,16 @@ def main():
             webcam_detection(
                 model=model,
                 device=device,
-                confidence_threshold=0.5,  # Adjust based on your model sensitivity
+                confidence_threshold=0.65,  # Adjust based on your model
                 enable_fps_display=True,
-                mirror=True  # Set to True for more intuitive interaction
+                mirror=True
             )
-
-    perform_evaluation(model, config, device)
+    
+    # Run evaluation if needed
+    print("\nDo you want to run evaluation? (y/n)")
+    choice = input().lower()
+    if choice == 'y' or choice == 'yes':
+        perform_evaluation(model, config, device)
 
 
 def find_best_checkpoint(checkpoint_dir):
