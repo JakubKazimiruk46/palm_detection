@@ -6,7 +6,7 @@ The project includes training, evaluation, live webcam inference, and visualizat
 
 ---
 
-## 📦 Project Structure
+## Project Structure
 
 ```
 project/
@@ -61,7 +61,7 @@ You will be prompted whether you want to:
 
 ---
 
-## 🤖 Model
+## Model
 
 The script uses `SSDLite320_MobileNetV3_Large` from `torchvision` as the default object detector.
 
@@ -73,7 +73,7 @@ Features:
 
 ---
 
-## 🧠 Training
+## Training
 
 * Dataset is split by unique `user_id`:
 
@@ -90,7 +90,7 @@ Metrics:
 
 ---
 
-## 📷 Webcam Detection
+## Webcam Detection
 
 After training, you can run live webcam detection:
 
@@ -106,7 +106,7 @@ Do you want to start live webcam detection? (y/n)
 
 ---
 
-## 📊 Evaluation
+## Evaluation
 
 To evaluate the best checkpoint on a separate validation set:
 
@@ -120,7 +120,7 @@ Do you want to run evaluation? (y/n)
 
 ---
 
-## 🖼️ Visualization & Inference
+## Visualization & Inference
 
 * Visualization samples from the evaluation set are saved under `visualization/`
 * You can also test the model on **new, unlabeled images** in `new_test_images/`
@@ -129,7 +129,7 @@ Do you want to run evaluation? (y/n)
 
 ---
 
-## 📝 Notes
+## Notes
 
 * Supported image formats: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`, `.heic`, etc.
 * Easy to extend to more gesture classes
@@ -137,7 +137,7 @@ Do you want to run evaluation? (y/n)
 
 ---
 
-## 📃 License
+## License
 
 This is an academic/research project. Use it at your own discretion or adapt it to your organization's needs.
 
