@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    ANNOTATIONS_PATH: str = '../annotations.json'
-    IMAGES_BASE_PATH: str = '../images'
-    SPLIT_FILE_PATH: str = os.path.join('../dataset', 'split.json')
-    CHECKPOINT_DIR: str = '../checkpoints'
-    VISUALIZATION_DIR: str = '../visualizations'
+    ANNOTATIONS_PATH: str = 'annotations.json'
+    IMAGES_BASE_PATH: str = 'images'
+    SPLIT_FILE_PATH: str = os.path.join('dataset', 'split.json')
+    CHECKPOINT_DIR: str = 'checkpoints'
+    VISUALIZATION_DIR: str = 'visualizations'
 
     BATCH_SIZE: int = 16
     NUM_EPOCHS: int = 30

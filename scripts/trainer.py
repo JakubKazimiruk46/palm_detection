@@ -5,8 +5,8 @@ from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torch.utils.data import DataLoader
 
-from config import Config
-from visualization import save_epoch_visualization
+from scripts.config import Config
+from scripts.visualization import save_epoch_visualization
 
 logger = logging.getLogger(__name__)
 

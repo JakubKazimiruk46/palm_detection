@@ -72,9 +72,15 @@ def run_webcam_inference(
             cv2.putText(display_frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             cv2.putText(display_frame, f"Infer: {inference_time*1000:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-            cv2.imshow('Gesture Detection', display_frame)
+            window_name = 'Gesture Detection'
+            cv2.imshow(window_name, display_frame)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                break
+
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
     except Exception as e:

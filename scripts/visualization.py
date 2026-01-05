@@ -7,7 +7,7 @@ import os
 import torchvision.ops
 from typing import List, Optional, Any
 from torch.utils.data import Dataset
-from config import CLASS_NAMES
+from scripts.config import CLASS_NAMES
 
 
 def denormalize_image(tensor_img: torch.Tensor) -> np.ndarray:
