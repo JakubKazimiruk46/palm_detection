@@ -1,4 +1,32 @@
-.idea
-checkpoints
-visualization
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
+
+venv/
+env/
+.env
+
+images/
+new_test_images/
+subsample.zip
+
+# annotations.json
+
+checkpoints/
+*.pth
+
+visualization/
+visualizations/
+inference_results/
+new_images_results/
+
 evaluation_results.json
+app.log
+*.log
+
+# dataset/

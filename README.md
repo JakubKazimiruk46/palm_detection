@@ -51,7 +51,7 @@ pip install -r requirements.txt
 4. Run the script:
 
 ```bash
-python second_version.py
+python main.py
 ```
 
 You will be prompted whether you want to:

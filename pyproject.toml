@@ -1,0 +1,31 @@
+[tool.black]
+line-length = 88
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  .*/migrations/.*
+)/
+'''
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+# Wykluczamy pliki, których nie chcemy sprawdzać
+exclude = [
+    "*/migrations/*",
+    "manage.py",
+    "settings.py",
+    "venv",
+    ".git",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP",]
+
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
